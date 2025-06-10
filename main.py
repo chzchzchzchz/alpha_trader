@@ -1,88 +1,85 @@
 #!/usr/bin/env python3
-import os, sys, time, signal
-from datetime import datetime, timezone
+"""
+Alpha Trader - Main entry point
+"""
+import os
+import sys
+import time
+import signal
+import logging
+from pathlib import Path
 
-from core.config           import Config, load_dotenv, check_config_hash, validate_config, SecretsManager, ChecksumVerifier
-from core.logger           import setup_logger
-from core.broker           import AlpacaBroker
-from core.data_handler     import DataHandler
-from core.strategy_manager import StrategyManager
-from core.executor         import TradeExecutor
-from core.scheduler        import TradingScheduler
-from core.performance_tracker import PerformanceTracker
-from backtest.backtester   import Backtester
+# Add project root to Python path
+sys.path.insert(0, str(Path(__file__).parent))
 
-class TradingSystem:
-    def __init__(self, cfg_file='config.yaml'):
-        self.cfg          = Config(cfg_file)
-        self.logger       = setup_logger(self.cfg.logging)
-        self.broker       = AlpacaBroker(self.cfg.alpaca)
-        self.data_handler = DataHandler(self.cfg)
-        self.perf         = PerformanceTracker()
-        self.executor     = TradeExecutor(self.broker, self.perf, self.cfg.capital.risk_per_trade)
-        self.manager      = StrategyManager(self.cfg.strategies, self.data_handler, self.perf)
-        self.scheduler    = TradingScheduler(self.cfg.schedule)
-        self.running      = True
-        signal.signal(signal.SIGINT,  self.stop)
-        signal.signal(signal.SIGTERM, self.stop)
+from core.settings import get_settings, load_dotenv
+from core.metrics import MetricsServer, metrics
+from core.trading_system import TradingSystem
 
-    def stop(self, *args):
-        self.running = False
+def setup_signal_handlers(trading_system):
+    """Setup graceful shutdown on signals"""
+    def signal_handler(signum, frame):
+        logging.info(f"Received signal {signum}, shutting down gracefully...")
+        trading_system.stop()
+        sys.exit(0)
 
-    def run_backtest(self):
-        self.logger.info("=== Starting Backtests ===")
-        backtester = Backtester(self.data_handler, self.cfg)
-        for name in self.cfg.strategies.enabled:
-            strat = self.manager.get_strategy(name)
-            if not strat:
-                self.logger.warning(f"{name} not found, skipping.")
-                continue
-            stats = backtester.run(strat)
-            self.logger.info(
-                f"[{name}] Sharpe: {stats['sharpe']:.2f} | "
-                f"Win rate: {stats['win_rate']:.2%} | "
-                f"Drawdown: {stats['drawdown']:.2%}"
-            )
-        self.logger.info("=== Backtests Complete ===")
-
-    def run_live(self):
-        self.logger.info("=== Entering Live Loop ===")
-        while self.running:
-            now = datetime.now(timezone.utc)
-            if not self.scheduler.should_run(now):
-                time.sleep(self.cfg.schedule.polling_interval)
-                continue
-            for name in self.cfg.strategies.enabled:
-                strat = self.manager.get_strategy(name)
-                if not strat or self.manager.should_kill_strategy(name):
-                    continue
-                sig = strat.generate_signal()
-                if sig.get("should_trade"):
-                    self.executor.execute_trade(sig, name)
-            time.sleep(self.cfg.schedule.polling_interval)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
 def main():
-    cfg = sys.argv[1] if len(sys.argv)>1 else 'config.yaml'
-    system = TradingSystem(cfg)
-    if system.cfg.mode == 'backtest':
-        system.run_backtest()
-    else:
-        system.run_live()
+    """Main entry point"""
+    # Load environment variables
+    load_dotenv()
+
+    # Get settings and validate
+    try:
+        settings = get_settings()
+        print(f"Starting Alpha Trader in {settings.env} mode")
+    except Exception as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Setup logging
+    logging.basicConfig(
+        level=getattr(logging, settings.logging.level),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(settings.logging.file),
+            logging.StreamHandler()
+        ]
+    )
+    logger = logging.getLogger('main')
+
+    # Start metrics server
+    metrics_server = MetricsServer(port=8000)
+    try:
+        metrics_server.start()
+        logger.info("Metrics server started on port 8000")
+    except Exception as e:
+        logger.error(f"Failed to start metrics server: {e}")
+        # Continue without metrics in development
+        if settings.env == 'production':
+            sys.exit(1)
+
+    # Initialize and start trading system
+    trading_system = TradingSystem(settings)
+    setup_signal_handlers(trading_system)
+
+    try:
+        if len(sys.argv) > 1 and sys.argv[1] == 'backtest':
+            logger.info("Starting backtest mode")
+            trading_system.run_backtest()
+        else:
+            logger.info("Starting live trading mode")
+            trading_system.run_live()
+    except KeyboardInterrupt:
+        logger.info("Received interrupt, shutting down...")
+    except Exception as e:
+        logger.error(f"Trading system error: {e}", exc_info=True)
+        sys.exit(1)
+    finally:
+        trading_system.stop()
+        logger.info("Shutdown complete")
 
 if __name__ == "__main__":
-    # Load .env
-    load_dotenv()
-    # Check config hash unless --override is present
-    override = "--override" in sys.argv
-    check_config_hash(override=override)
-    # Validate config
-    try:
-        validate_config()
-    except Exception as e:
-        print(f"Config validation failed: {e}", file=sys.stderr)
-        sys.exit(1)
-    # Check secret expiry (stub)
-    SecretsManager.check_secret_expiry()
-    # Nightly checksum verification (stub)
-    ChecksumVerifier.nightly_check()
     main()
