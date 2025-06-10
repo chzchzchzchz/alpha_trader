@@ -1,0 +1,5 @@
+# Sample config hash for alpha_trader
+# This file should contain the SHA-256 hash of the validated configuration
+# Example (replace with actual hash):
+1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef
+
