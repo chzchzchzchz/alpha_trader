@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # alpha_trader
 
 ## Quick Start (No Maven/Homebrew Required)
@@ -36,3 +37,6 @@ tail -f logs/trading.log
 
 For more, see `docs/ARCHITECTURE.md` and `docs/OPERATIONS.md`.
 
+=======
+# alpha_trader
+>>>>>>> 7bc9b2253b0deb8814c3cfbd21189138d047277b
