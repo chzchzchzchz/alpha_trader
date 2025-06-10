@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # alpha_trader
 
 ## Quick Start (No Maven/Homebrew Required)
