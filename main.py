@@ -2,7 +2,7 @@
 import os, sys, time, signal
 from datetime import datetime, timezone
 
-from core.config           import Config
+from core.config           import Config, load_dotenv, check_config_hash, validate_config, SecretsManager, ChecksumVerifier
 from core.logger           import setup_logger
 from core.broker           import AlpacaBroker
 from core.data_handler     import DataHandler
@@ -70,4 +70,19 @@ def main():
         system.run_live()
 
 if __name__ == "__main__":
+    # Load .env
+    load_dotenv()
+    # Check config hash unless --override is present
+    override = "--override" in sys.argv
+    check_config_hash(override=override)
+    # Validate config
+    try:
+        validate_config()
+    except Exception as e:
+        print(f"Config validation failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    # Check secret expiry (stub)
+    SecretsManager.check_secret_expiry()
+    # Nightly checksum verification (stub)
+    ChecksumVerifier.nightly_check()
     main()
