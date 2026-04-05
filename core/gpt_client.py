@@ -1,26 +1,38 @@
-import openai, os, pathlib, textwrap, ast, importlib.util
+import ast
+import os
+import pathlib
+import textwrap
+import time
+
+from openai import OpenAI
+
 from core.logger import get_logger
-from backtest.backtester import Backtester
+
 
 class GPTClient:
     def __init__(self):
         self.logger = get_logger()
-        openai.api_key = os.getenv('OPENAI_API_KEY')
+        self._client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
     def generate_new_strategy(self, prompt: str, save_dir: pathlib.Path):
         try:
-            resp = openai.ChatCompletion.create(
+            resp = self._client.chat.completions.create(
                 model='gpt-4o-mini',
-                messages=[{'role':'user','content':prompt}],
-                temperature=0.5
+                messages=[{'role': 'user', 'content': prompt}],
+                temperature=0.5,
+                timeout=60,
             )
             code = resp.choices[0].message.content
-            tree = ast.parse(code)
-            name = f'gpt_strategy_{int(os.times().elapsed)}.py'
-            path = save_dir/name
-            with open(path, 'w') as f:
-                f.write(textwrap.dedent(code))
+            ast.parse(code)  # validate syntax before saving
+            name = f'gpt_strategy_{int(time.time())}.py'
+            path = save_dir / name
+            save_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text(textwrap.dedent(code))
+            self.logger.info(f'Generated strategy saved to {path}')
             return path
+        except SyntaxError as e:
+            self.logger.error(f'GPT returned invalid Python syntax: {e}')
+            return None
         except Exception as e:
-            self.logger.error(f'GPT generation error {e}')
+            self.logger.error(f'GPT generation error: {e}')
             return None

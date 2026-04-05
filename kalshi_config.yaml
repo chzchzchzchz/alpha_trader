@@ -1,0 +1,51 @@
+# Kalshi Bot Configuration
+# Copy to .env and set KALSHI_API_KEY_ID and KALSHI_API_KEY_FILE
+
+kalshi:
+  demo: true                          # set false for real money
+  key_id: "${KALSHI_API_KEY_ID}"
+  key_file: "${KALSHI_API_KEY_FILE}"  # path to RSA private key PEM
+
+capital:
+  initial_balance: 500                # USD starting balance
+  max_open_positions: 10
+  max_daily_loss: 50                  # stop trading if down this much in a day
+
+strategies:
+  near_zero:
+    enabled: true
+    price_ceiling: 0.08               # buy YES/NO at ≤ 8¢
+    min_volume_24h: 50
+    min_days_to_close: 5
+    max_days_to_close: 45
+    target_multiplier: 3.0            # sell at 3× entry
+    stop_loss_frac: 0.60
+    max_contracts: 20
+    min_smart_money_vol: 5
+
+  category_specialist:
+    enabled: true
+    min_trades_per_category: 10       # need this many fills before trusting stats
+    min_win_rate: 0.55
+    blacklist_win_rate: 0.40
+    max_categories: 5
+    contracts_per_trade: 5
+    confidence_multiplier: 1.5
+
+  oracle_follow:
+    enabled: true
+    min_gap: 0.08                     # min price discrepancy to trade
+    max_position_cents: 25
+    contracts_per_trade: 10
+    hold_minutes: 5.0
+    polymarket_enabled: true
+
+schedule:
+  polling_interval: 60               # seconds between market scans
+  category_refresh_interval: 3600   # seconds between performance profile refresh
+
+logging:
+  level: "INFO"
+  file: "logs/kalshi.log"
+  max_file_size: 10485760
+  backup_count: 5
