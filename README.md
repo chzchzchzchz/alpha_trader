@@ -142,7 +142,7 @@ RATIONALE: Inverted yield curve (-0.42) and elevated CPI (3.2%) confirm late-
 
 ### Kelly Criterion
 
-The Portfolio Vault sizes every rotation using **quarter-Kelly** (25 % of full
+The Portfolio Vault sizes every rotation using **quarter-Kelly** (25% of full
 Kelly) to reduce variance while maintaining positive expected value:
 
 ```
@@ -159,7 +159,7 @@ Two conditions immediately halt trading and send a Telegram alert:
 
 | Trigger | Threshold |
 |---------|-----------|
-| Kelly allocation too large | > 20 % of portfolio equity in one rotation |
+| Kelly allocation too large | > 20% of portfolio equity in one rotation |
 | Market too volatile | VIX ≥ 35 (fetched from FRED `VIXCLS`) |
 
 ### Sharpe & Sortino Ratios
