@@ -1,22 +1,26 @@
 """
 LangGraph StateGraph for the Macro Cycle Engine.
 
-Pipeline (left to right):
-  leading_indicators  ──┐
-                        ├──► cycle_economist ──┐
-  lagging_indicators  ──┘                      │
-                         sentiment_reader ──────┤
-                                                │
-                                       sector_specialist
-                                                │
-                                       portfolio_vault
-                                                │
-                                       trader_executor
-                                                │
-                                             END
+Pipeline (sequential):
 
-Researchers run in parallel (both write disjoint keys), then analysts
-run in series, followed by the manager and executor.
+  leading_indicators
+         │
+  lagging_indicators
+         │
+  cycle_economist
+         │
+  sentiment_reader
+         │
+  sector_specialist
+         │
+  portfolio_vault
+         │
+  trader_executor
+         │
+        END
+
+Analysts run sequentially so each can read the full state written by
+the previous step without requiring a fan-in join pattern.
 """
 from __future__ import annotations
 
@@ -56,22 +60,18 @@ def build_macro_graph():
     builder.add_node("portfolio_vault",    portfolio_vault_node)
     builder.add_node("trader_executor",    trader_executor_node)
 
-    # ── Entry point: both researchers run after START ─────────────────
+    # ── Sequential pipeline ───────────────────────────────────────────
+    # Researchers run first (leading before lagging so lagging can merge
+    # its FRED data into the snapshot started by leading)
     builder.set_entry_point("leading_indicators")
-
-    # leading_indicators → lagging_indicators (sequential so lagging can
-    # merge its FRED data into the existing snapshot from leading)
     builder.add_edge("leading_indicators", "lagging_indicators")
 
-    # After both researchers complete, run analysts
+    # Analysts run sequentially so each reads the complete prior state
     builder.add_edge("lagging_indicators", "cycle_economist")
-    builder.add_edge("lagging_indicators", "sentiment_reader")
+    builder.add_edge("cycle_economist",    "sentiment_reader")
+    builder.add_edge("sentiment_reader",   "sector_specialist")
 
-    # Both analysts feed into sector specialist
-    builder.add_edge("cycle_economist",  "sector_specialist")
-    builder.add_edge("sentiment_reader", "sector_specialist")
-
-    # Sector specialist → vault → executor → END
+    # Manager and executor
     builder.add_edge("sector_specialist", "portfolio_vault")
     builder.add_edge("portfolio_vault",   "trader_executor")
     builder.add_edge("trader_executor",   END)

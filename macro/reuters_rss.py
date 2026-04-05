@@ -9,8 +9,8 @@ Feeds used:
   - Reuters Business News
   - Reuters Markets
 
-Each feed returns clean <title> entries; no BeautifulSoup needed for
-well-formed RSS (xml.etree.ElementTree is stdlib and zero-dependency).
+Each feed returns clean <title> entries parsed via the stdlib
+xml.etree.ElementTree — no third-party HTML parsers required.
 """
 from __future__ import annotations
 
