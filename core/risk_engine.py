@@ -15,8 +15,9 @@ Reference: https://github.com/OctagonAI/kalshi-deep-trading-bot
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 logger = logging.getLogger("trading")
 
@@ -227,3 +228,93 @@ class RiskEngine:
                 f"total drawdown {dd_frac:.1%} ≥ limit {self.cfg.max_total_drawdown_frac:.1%}"
             )
         return GateResult(5, "drawdown", True)
+
+    # ------------------------------------------------------------------
+    # Risk-adjusted return metrics
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def sharpe_ratio(
+        returns: Sequence[float],
+        risk_free_rate: float = 0.0,
+    ) -> float:
+        """
+        Annualised Sharpe Ratio.
+
+          Sharpe = (R_p - R_f) / σ_p
+
+        Parameters
+        ----------
+        returns:        Sequence of per-period returns (e.g. daily P&L / equity).
+        risk_free_rate: Per-period risk-free rate (default 0).
+
+        Returns ``float("nan")`` when σ_p == 0 (all returns identical).
+        """
+        if not returns:
+            return float("nan")
+        n = len(returns)
+        mean_r = sum(returns) / n
+        excess = mean_r - risk_free_rate
+        variance = sum((r - mean_r) ** 2 for r in returns) / n
+        sigma = math.sqrt(variance)
+        if sigma == 0.0:
+            return float("nan")
+        return excess / sigma
+
+    @staticmethod
+    def sortino_ratio(
+        returns: Sequence[float],
+        risk_free_rate: float = 0.0,
+    ) -> float:
+        """
+        Sortino Ratio — penalises only downside volatility.
+
+          Sortino = (R_p - R_f) / σ_downside
+
+        Parameters
+        ----------
+        returns:        Sequence of per-period returns.
+        risk_free_rate: Per-period risk-free rate (default 0).
+
+        Returns ``float("nan")`` when there are no negative excess returns.
+        """
+        if not returns:
+            return float("nan")
+        n = len(returns)
+        mean_r = sum(returns) / n
+        excess = mean_r - risk_free_rate
+        downside_sq = [
+            (r - risk_free_rate) ** 2
+            for r in returns
+            if r < risk_free_rate
+        ]
+        if not downside_sq:
+            return float("nan")
+        downside_dev = math.sqrt(sum(downside_sq) / n)
+        if downside_dev == 0.0:
+            return float("nan")
+        return excess / downside_dev
+
+    @staticmethod
+    def volatility_scaled_size(
+        base_size: float,
+        current_vol: float,
+        target_vol: float,
+    ) -> float:
+        """
+        Scale a position so dollar-volatility stays constant as VIX rises.
+
+          scaled_size = base_size × (target_vol / current_vol)
+
+        Parameters
+        ----------
+        base_size:   Intended position size before volatility adjustment.
+        current_vol: Current realised or implied volatility (e.g. VIX / 100).
+        target_vol:  Desired constant volatility level.
+
+        Returns ``base_size`` unchanged when ``current_vol`` is zero to avoid
+        division errors.
+        """
+        if current_vol <= 0.0:
+            return base_size
+        return base_size * (target_vol / current_vol)

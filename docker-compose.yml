@@ -1,0 +1,38 @@
+# ── Alpha Trader — Docker Compose ────────────────────────────────────────────
+# Runs the Macro Cycle Engine as a resilient, auto-restarting service.
+#
+# Usage:
+#   cp .env.sample .env        # fill in your API keys
+#   docker compose up -d       # start in the background
+#   docker compose logs -f     # tail live logs
+#   docker compose down        # stop
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  macro_engine:
+    build: .
+    image: alpha_trader:latest
+    container_name: alpha_trader_macro
+
+    # Automatically restart after crashes or VPS reboots.
+    restart: always
+
+    # Secrets are injected from .env — never hard-coded in this file.
+    env_file:
+      - .env
+
+    # Override individual environment variables here if needed.
+    environment:
+      # Smart-routing model selection (overrides config.yaml defaults)
+      - DEEP_THINK_LLM=${DEEP_THINK_LLM:-qwen/qwen3-plus:free}
+      - QUICK_THINK_LLM=${QUICK_THINK_LLM:-stepfun/step-3.5-flash:free}
+      # Set to "true" to enable chain-of-thought reasoning output
+      - THOUGHT_SIGNALS=${THOUGHT_SIGNALS:-false}
+
+    # Persist logs on the host so they survive container restarts.
+    volumes:
+      - ./logs:/app/logs
+
+    # Optional: expose Prometheus metrics endpoint
+    # ports:
+    #   - "8000:8000"

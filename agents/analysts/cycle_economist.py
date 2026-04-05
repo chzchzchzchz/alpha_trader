@@ -1,8 +1,18 @@
 """
 Cycle Economist analyst node.
 
-Uses the LLMForecaster to determine the current macro cycle phase
-(expansion / peak / contraction / trough) from FRED indicator data.
+Uses the deep-think LLM (default: qwen/qwen3-plus:free via OpenRouter) to
+determine the current macro cycle phase (expansion / peak / contraction /
+trough) from FRED indicator data.
+
+Key design choices
+------------------
+* Model selection:  reads DEEP_THINK_LLM env var; falls back to the value set
+  in config.yaml macro.deep_think_llm; final default is qwen/qwen3-plus:free.
+* Thought signals:  when THOUGHT_SIGNALS=true the prompt asks the model to
+  emit a THINKING block before its verdict, enabling audit of the reasoning.
+* Lagging Indicator Trap guard:  the prompt explicitly requires the 10Y-2Y
+  spread (T10Y2Y) to confirm any cycle-phase transition before committing.
 """
 from __future__ import annotations
 
@@ -18,23 +28,47 @@ logger = logging.getLogger("trading")
 
 _CYCLE_PHASES = ("expansion", "peak", "contraction", "trough")
 
-_PROMPT_TEMPLATE = """You are a macro cycle economist.
+# Default model; overridden by DEEP_THINK_LLM env var.
+_DEFAULT_DEEP_THINK_LLM = "qwen/qwen3-plus:free"
 
-Based on the following leading and lagging economic indicators, determine
-the current phase of the US business cycle.
+_PROMPT_BASE = """You are a Senior Quant Researcher specialising in macro cycle analysis.
+You do not use emotional language. Your outputs must prioritise Risk-Adjusted
+Returns over raw profit.
 
-ECONOMIC INDICATORS:
+FRED DATA SNAPSHOT:
 {macro_summary}
 
-Instructions:
+Instructions — follow all rules without exception:
 1. Identify the cycle phase: expansion, peak, contraction, or trough.
-2. Provide a confidence score between 0.0 and 1.0.
-3. Give a one-sentence rationale.
+2. You MUST cite the specific T10Y2Y (Yield Curve 10Y-2Y spread), CPIAUCSL
+   (CPI), and UNRATE (Unemployment) values from the snapshot above to justify
+   your classification. Do not assert a phase transition unless T10Y2Y
+   confirms it — this is the Lagging Indicator Trap guard.
+3. Provide a confidence score (0.0–1.0) reflecting data quality and signal
+   agreement.
+4. Give a one-sentence rationale that names the specific data points used."""
+
+_PROMPT_NO_THINKING = (
+    _PROMPT_BASE
+    + """
 
 Respond ONLY in this exact format (no other text):
 PHASE: <expansion|peak|contraction|trough>
 CONFIDENCE: <0.0-1.0>
-RATIONALE: <one sentence>"""
+RATIONALE: <one sentence citing T10Y2Y, CPI, and Unemployment values>"""
+)
+
+_PROMPT_WITH_THINKING = (
+    _PROMPT_BASE
+    + """
+
+Respond ONLY in this exact format (no other text):
+THINKING: <cite T10Y2Y=[value], CPI=[value], UNRATE=[value]; explain how each \
+supports or contradicts the phase; flag the Lagging Indicator Trap if present>
+PHASE: <expansion|peak|contraction|trough>
+CONFIDENCE: <0.0-1.0>
+RATIONALE: <one sentence citing T10Y2Y, CPI, and Unemployment values>"""
+)
 
 
 def cycle_economist_node(state: MacroCycleState) -> MacroCycleState:
@@ -78,9 +112,20 @@ def _query_cycle_phase(
     return _heuristic_cycle_phase(macro_summary)
 
 
+def _thought_signals_enabled() -> bool:
+    return os.getenv("THOUGHT_SIGNALS", "false").lower() in ("true", "1", "yes")
+
+
+def _deep_think_model() -> str:
+    return os.getenv("DEEP_THINK_LLM", _DEFAULT_DEEP_THINK_LLM)
+
+
 def _llm_cycle_phase(macro_summary: str, api_key: str) -> tuple[str, float]:
-    """Call OpenRouter LLM and parse the structured response."""
-    prompt = _PROMPT_TEMPLATE.format(macro_summary=macro_summary)
+    """Call OpenRouter deep-think LLM and parse the structured response."""
+    use_thinking = _thought_signals_enabled()
+    template = _PROMPT_WITH_THINKING if use_thinking else _PROMPT_NO_THINKING
+    prompt = template.format(macro_summary=macro_summary)
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "HTTP-Referer":  "https://alpha-trader",
@@ -88,14 +133,14 @@ def _llm_cycle_phase(macro_summary: str, api_key: str) -> tuple[str, float]:
         "Content-Type":  "application/json",
     }
     body = {
-        "model":       "meta-llama/llama-3.3-70b-instruct",
+        "model":       _deep_think_model(),
         "messages":    [{"role": "user", "content": prompt}],
         "temperature": 0.1,
-        "max_tokens":  150,
+        "max_tokens":  400 if use_thinking else 150,
     }
     resp = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
-        json=body, headers=headers, timeout=20,
+        json=body, headers=headers, timeout=30,
     )
     resp.raise_for_status()
     text = resp.json()["choices"][0]["message"]["content"]
@@ -104,13 +149,16 @@ def _llm_cycle_phase(macro_summary: str, api_key: str) -> tuple[str, float]:
     confidence = 0.5
     for line in text.splitlines():
         line = line.strip()
-        if line.upper().startswith("PHASE:"):
+        upper = line.upper()
+        if upper.startswith("THINKING:") and use_thinking:
+            logger.info("[CycleEconomist] Reasoning: %s", line.split(":", 1)[1].strip())
+        elif upper.startswith("PHASE:"):
             raw = line.split(":", 1)[1].strip().lower()
             for p in _CYCLE_PHASES:
                 if p in raw:
                     phase = p
                     break
-        elif line.upper().startswith("CONFIDENCE:"):
+        elif upper.startswith("CONFIDENCE:"):
             m = re.search(r"(\d+(?:\.\d+)?)", line)
             if m:
                 val = float(m.group(1))
