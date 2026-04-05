@@ -2,7 +2,11 @@
 Sentiment Reader analyst node.
 
 Classifies overall market sentiment (bullish / neutral / bearish) from
-Reuters RSS headlines using the LLMForecaster's OpenRouter integration.
+Reuters RSS headlines using the quick-think LLM (default:
+stepfun/step-3.5-flash:free via OpenRouter).
+
+Model selection: reads QUICK_THINK_LLM env var; falls back to
+stepfun/step-3.5-flash:free.
 """
 from __future__ import annotations
 
@@ -17,6 +21,13 @@ from agents.state import MacroCycleState
 logger = logging.getLogger("trading")
 
 _SENTIMENTS = ("bullish", "neutral", "bearish")
+
+# Default model; overridden by QUICK_THINK_LLM env var.
+_DEFAULT_QUICK_THINK_LLM = "stepfun/step-3.5-flash:free"
+
+
+def _quick_think_model() -> str:
+    return os.getenv("QUICK_THINK_LLM", _DEFAULT_QUICK_THINK_LLM)
 
 _PROMPT_TEMPLATE = """You are a financial market sentiment analyst.
 
@@ -77,7 +88,7 @@ def _llm_sentiment(summary: str, api_key: str) -> str:
         "Content-Type":  "application/json",
     }
     body = {
-        "model":       "meta-llama/llama-3.3-70b-instruct",
+        "model":       _quick_think_model(),
         "messages":    [{"role": "user", "content": prompt}],
         "temperature": 0.1,
         "max_tokens":  80,

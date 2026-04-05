@@ -39,6 +39,8 @@ class MacroCycleState(TypedDict, total=False):
     sector_rationale: str
 
     # ── Trade layer ───────────────────────────────────────────────────
+    # CBOE VIX level fetched by the portfolio vault (None if unavailable)
+    vix: Optional[float]
     # Fraction of buying power to allocate (0.0 – 1.0)
     allocation_fraction: float
     # Dollar amount to trade

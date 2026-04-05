@@ -6,6 +6,20 @@ alpaca:
 
 mode: "backtest"
 
+# ── Macro Cycle Engine ────────────────────────────────────────────────────────
+macro:
+  # Smart routing: two-tier LLM selection via OpenRouter.
+  # Override either value with the DEEP_THINK_LLM / QUICK_THINK_LLM env vars.
+  deep_think_llm: "qwen/qwen3-plus:free"      # Cycle Economist (yield-curve reasoning)
+  quick_think_llm: "stepfun/step-3.5-flash:free"  # Sentiment Analyst (RSS summarisation)
+
+  # When true the models emit a THINKING block before their structured verdict.
+  # Set the THOUGHT_SIGNALS env var to "true" at runtime to enable.
+  thought_signals: true
+
+  # Number of analyst debate rounds (Leading → Lagging → Trader moderates).
+  max_debate_rounds: 3
+
 capital:
   initial_equity: 100000
   max_position_size: 0.05
