@@ -319,7 +319,101 @@ class AutonomousTrader:
         self.running = False
         return {"status": "STOPPED"}
 
+ceo_verified = {
+    "last_balance_check": None,
+    "auth_verified": False,
+    "last_cycle_ok": False,
+    "blocks": 0,
+    "approvals": 0,
+}
+
+class CEOVerifier:
+    def __init__(self):
+        self.balance_history = []
+        self.drawdown_limit = 0.15
+        self.min_confidence = 0.52
+        self.learned_patterns = []
+
+    def verify_balance(self, balance):
+        self.balance_history.append(balance)
+        if len(self.balance_history) >= 2:
+            peak = max(self.balance_history)
+            dd = (peak - balance) / peak if peak > 0 else 0
+            if dd > self.drawdown_limit:
+                return {"approved": False, "reason": f"DRAWDOWN {dd:.1%} > limit"}
+        if balance < 1.0:
+            return {"approved": False, "reason": "Balance below $1.00 minimum"}
+        return {"approved": True}
+
+    def verify_edge(self, edge):
+        if edge.get("confidence", 0) < self.min_confidence:
+            return {"approved": False, "reason": f"Confidence {edge['confidence']:.2%} < {self.min_confidence:.0%}"}
+        if edge.get("edge_cents", 0) < 3:
+            return {"approved": False, "reason": f"Edge {edge['edge_cents']}c < 3c min"}
+        for pat in self.learned_patterns:
+            if edge.get("ticker", "").startswith(pat.get("prefix", "")):
+                if pat.get("win_rate", 0.5) < 0.50:
+                    return {"approved": False, "reason": f"Ticker {edge['ticker']} bad history"}
+        return {"approved": True}
+
+    def learn_from_outcome(self, ticker, pnl, strategy):
+        self.learned_patterns.append({
+            "prefix": ticker[:8], "strategy": strategy,
+            "win_rate": 1.0 if pnl > 0 else 0.0,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+        conn = sqlite3.connect(DB)
+        exists = conn.execute("SELECT id FROM strategy_performance WHERE strategy=?", (strategy,)).fetchone()
+        if exists:
+            conn.execute("UPDATE strategy_performance SET trades=trades+1,wins=wins+?,total_pnl=total_pnl+? WHERE strategy=?",
+                (1 if pnl > 0 else 0, pnl or 0, strategy))
+        else:
+            conn.execute("INSERT INTO strategy_performance (ts,strategy,trades,wins,total_pnl,active) VALUES (?,?,?,?,?,1)",
+                (datetime.now(timezone.utc).isoformat(), strategy, 1, 1 if pnl > 0 else 0, pnl or 0))
+        conn.commit(); conn.close()
+        return {"learned": True, "total_patterns": len(self.learned_patterns)}
+
+    def get_growth_rate(self):
+        conn = sqlite3.connect(DB)
+        curve = conn.execute("SELECT balance FROM equity_curve ORDER BY id").fetchall()
+        conn.close()
+        if len(curve) < 2:
+            return {"growth_rate": 0, "cycles": len(curve)}
+        first = curve[0][0]; last = curve[-1][0]; n = len(curve)
+        if first > 0:
+            cagr = (last / first) ** (1.0 / max(n - 1, 1)) - 1
+            return {"growth_rate": round(cagr, 4), "from": first, "to": last, "cycles": n}
+        return {"growth_rate": 0}
+
+ceo = CEOVerifier()
 trader = AutonomousTrader()
+
+# Override run_cycle with CEO verification
+_orig_run_cycle = trader.run_cycle
+def _ceo_verified_cycle():
+    bal = trader.update_balance_from_kalshi()
+    trader.current_balance = bal
+    v = ceo.verify_balance(bal)
+    if not v["approved"]:
+        return {"balance": bal, "status": "BLOCKED", "reason": v["reason"],
+                "ceo_blocks": ceo_verified.get("blocks", 0)}
+    results = trader.research_markets()
+    approved_edges = []
+    blocked_edges = []
+    for e in results.get("edges", []):
+        ver = ceo.verify_edge(e)
+        if ver["approved"]:
+            approved_edges.append(e)
+        else:
+            blocked_edges.append({"ticker": e.get("ticker"), "reason": ver["reason"]})
+    executed = trader.execute_trades(approved_edges, bal)
+    trader.update_equity()
+    return {"balance": bal, "status": "RUNNING", "edges_found": len(results.get("edges", [])),
+            "ceo_approved": len(approved_edges), "ceo_blocked": blocked_edges,
+            "trades_executed": executed, "growth": ceo.get_growth_rate(),
+            "patterns_learned": len(ceo.learned_patterns)}
+
+trader.run_cycle = _ceo_verified_cycle
 
 # ─── FASTAPI ───
 from fastapi import FastAPI
@@ -395,6 +489,39 @@ def logs():
     rows = conn.execute("SELECT * FROM autonomous_log ORDER BY id DESC LIMIT 50").fetchall()
     conn.close()
     return [{"id": r[0], "time": r[1], "event": r[2], "details": r[3]} for r in rows]
+
+@app.get("/api/ceo")
+def ceo_status():
+    return {
+        "balance_checked": ceo.verify_balance(trader.current_balance),
+        "min_confidence": ceo.min_confidence,
+        "drawdown_limit": ceo.drawdown_limit,
+        "patterns_learned": len(ceo.learned_patterns),
+        "growth_rate": ceo.get_growth_rate(),
+        "balance_history": ceo.balance_history[-10:],
+    }
+
+@app.post("/api/learn")
+def learn_from_result(ticker: str = "", pnl: float = 0, strategy: str = "unknown"):
+    return ceo.learn_from_outcome(ticker, pnl, strategy)
+
+@app.get("/api/growth")
+def growth():
+    return ceo.get_growth_rate()
+
+@app.post("/api/self-improve")
+def self_improve():
+    """CEO reviews last 10 trades, adjusts strategy weights."""
+    conn = sqlite3.connect(DB)
+    trades = conn.execute("SELECT ticker, side, pnl, strategy FROM trades ORDER BY id DESC LIMIT 20").fetchall()
+    conn.close()
+    if not trades:
+        return {"message": "No trades to learn from yet"}
+    for t in trades:
+        ceo.learn_from_outcome(t[0], t[2] or 0, t[3] or "unknown")
+    return {"improved": True, "patterns": len(ceo.learned_patterns),
+            "worst_prefixes": [p for p in ceo.learned_patterns if p.get("win_rate", 0.5) < 0.50],
+            "best_prefixes": [p for p in ceo.learned_patterns if p.get("win_rate", 0.5) >= 0.50]}
 
 if __name__ == "__main__":
     import uvicorn
