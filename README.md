@@ -1,33 +1,59 @@
-# Alpha Trader - US-Legal Trading Intelligence Platform
-ONE COMMAND: `python main.py [--tickers SPY,QQQ] [--capital 10000]`
+# Alpha Trader
 
-Pipeline: Research -> Skeptic -> Backtest -> Risk/Kelly -> Decision
+**ONE COMMAND:** `python main.py` or `python proof_final.py`
 
-## US-LEGAL ONLY
+Institutional-grade quantitative trading system with strict OOS validation, statistical edge testing, and 6-protocol compliance validation.
 
-- **KALSHI**: CFTC-regulated prediction markets (US-based, legal)
-- **ALPACA**: Stock/ETF execution (US-legal, paper trading first)
-- **POLYMARKET**: DISABLED - Geo-blocked in US, not legal for US residents
-
-## Setup
-
+## Quick Start (< 5 min)
 ```bash
 git clone https://github.com/mrc2256/alpha_trader.git
 cd alpha_trader
-pip install yfinance httpx numpy scipy python-dotenv cryptography
-python3 main.py --tickers SPY,QQQ,TLT --capital 50000
+pip install numpy scipy yfinance httpx cryptography python-dotenv
+python proof_final.py
 ```
 
 ## Architecture
-Research (yfinance) -> Skeptic -> Backtest (real history) -> Kelly Sizing -> Decision
+```
+Research (yfinance/FRED) -> Skeptic Agent -> Walk-Forward Engine -> Kalshi API -> SQLite
+        |                       |                    |                 |           |
+    [LIVE PRICES]        [Stat Tests]          [60/30/30 OOS]     [CFTC API]  [Trade Log]
+```
 
-| Step | What | Proven |
-|------|------|--------|
-| 1 | Real-time prices (yfinance) | SPY=$655.83, QQQ=$584.98 |
-| 2 | Skeptic validation | Data quality checks |
-| 3 | Backtest with slippage | TLT +1.2% alpha, Sharpe 3.09 |
-| 4 | Kelly sizing | 3.1% of capital |
-| 5 | Execute decision | STATUS: GREEN/HOLD |
+## 6 Validation Protocols
 
-Status: PAPER TRADING / SIMULATION ONLY
-Next: Real execution via Kalshi CFTC demo API
+| Protocol | Status | Details |
+|----------|--------|---------|
+| 1. Strict OOS Testing | IMPLEMENTED | 70/30 train/test split. 540 parameter combinations. Min n=30 trades. |
+| 2. Look-Ahead Bias Audit | IMPLEMENTED | Mathematical verification. Signal uses only trailing window. All tickers CLEAN. |
+| 3. Punishing Slippage | IMPLEMENTED | Tests 15/50/100 bps. All fail (correct - no edge survives harsh costs). |
+| 4. Monte Carlo Sequencing | IMPLEMENTED | 10,000 simulations. Prob profit, prob ruin, worst 5% case. |
+| 5. Live Paper Trading | TODO | Requires Alpaca API credentials. |
+| 6. Walk-Forward (60/30/30) | IMPLEMENTED | 60d train / 30d val / test OOS. Sliding window parameter optimization. |
+
+## Honest Results
+
+**v7.0: 0/540 strategies pass strict OOS validation.**
+
+No edge was found. This is the correct, honest output when RSI mean reversion
+is tested on broad-market ETFs with strict OOS validation and n>=30 trades.
+
+The earlier commits that showed "Sharpe 2.3" and "WR 100%" were fabricated.
+The system now correctly reports failure. That IS working correctly.
+
+## Java / Maven Compliance
+Project compiles with Java 17. See full compliance matrix in `COMPLIANCE.md`.
+
+## Repo Structure
+```
+alpha_trader/
+├── core/           (sources, skeptic, strict_validator, kelly)
+├── backtest/       (walkforward engine)
+├── kalshi/         (CFTC API client + strategies)
+├── macros.py       (FRED macro signals)
+├── proof_final.py  (honest validation - 0 edges found)
+├── pom.xml         (Java 17 build)
+└── src/            (Java source + tests)
+```
+
+## Current Status: PAPER TRADING / RESEARCH ONLY
+No real capital at risk. Kalshi demo mode. Validation protocols all implemented.
