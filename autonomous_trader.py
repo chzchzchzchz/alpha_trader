@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AUTONOMOUS KALSHI TRADER v15.1 — State-Aware, Self-Correcting"""
+"""AUTONOMOUS KALSHI TRADER v16 — Backtest-Validated Every Signal"""
 import os, sys, time, json, sqlite3, math, logging, random
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,6 +7,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).parent))
 from kalshi.client import KalshiClient
+import backtest_validation_layer as vlayer
 
 KEY_ID = "REDACTED_KALSHI_KEY_ID"
 PEM = os.path.expanduser("~/.kalshi/private_key.pem")
@@ -291,13 +292,36 @@ class Trader:
     def execute(self, signals, max_t=MAX_CONCURRENT):
         placed = 0
         skipped = dict(cooldown=0, already_pending=0, stale=0,
-                       coherence=0, profit=0, holds=0)
+                       coherence=0, profit=0, holds=0, bt_fail=0)
 
         if self.daily_pnl < -MAX_DAILY_LOSS:
             log.warning(f"  ⛔ Daily loss limit hit (${abs(self.daily_pnl)/100:.2f})")
             return skipped
 
-        for sig in signals:
+        # ── RULE 0: Backtest validation on every signal ──
+        log.info(f"  [VALIDATION] Running backtest check on top signals...")
+        validated_signals = []
+        for sig in signals[:max_t * 3]:  # Validate more signals than max_t
+            ticker = sig["ticker"]
+            side = "yes" if sig["rec"] == "buy_yes" else "no"
+            pc = sig["ask_cents"] if side == "yes" else max(1, int(sig["swarm_yes"] * 100))
+            pc = max(1, min(pc, 15))
+
+            strat = "near_zero_no" if side == "no" else "buy_yes_cheap"
+            passed, bt_stats, reason = vlayer.validate_signal(ticker, side, strat, pc)
+
+            if passed:
+                sig["bt_stats"] = bt_stats
+                sig["bt_reason"] = reason
+                validated_signals.append(sig)
+                log.info(f"    ✅ BT PASS: {ticker} {side} @ {pc}c — {reason}")
+            else:
+                log.info(f"    ❌ BT FAIL: {ticker} {side} @ {pc}c — {reason}")
+                skipped["bt_fail"] += 1
+
+        log.info(f"  [VALIDATION] {len(validated_signals)}/{len(signals[:max_t*3])} signals passed backtest")
+
+        for sig in validated_signals:
             if placed >= max_t: break
 
             ticker = sig["ticker"]
@@ -331,7 +355,7 @@ class Trader:
                 skipped["coherence"] += 1
                 continue
 
-            # Rule 5: Min net profit
+            # Rule 5: Min net profit (double-check)
             expected = self.state.net_profit(side, pc, swarm_yes)
             if expected < MIN_NET_PROFIT:
                 log.debug(f"    SKIP {ticker}: expected profit {expected:.1f}c < {MIN_NET_PROFIT}c threshold")
@@ -343,7 +367,9 @@ class Trader:
                 skipped["holds"] += 1
                 continue
 
-            log.info(f"  ▶ TRADE: {ticker} {side} x1 @{pc}c (exp_profit={expected:.1f}c edge={sig['edge']:+.1%})")
+            bt = sig.get("bt_stats", {})
+            bt_info = f"WR={bt.get('bt_win_rate',0):.1%} PnL={bt.get('bt_total_pnl',0):+.1f}c" if bt else "no BT data"
+            log.info(f"  ▶ TRADE: {ticker} {side} x1 @{pc}c [BT: {bt_info}] edge={sig['edge']:+.1%}")
             try:
                 result = self.client.place_order(
                     ticker=ticker, action="buy", side=side, count=1,
@@ -367,7 +393,8 @@ class Trader:
             except Exception as e:
                 log.error(f"    ✗ FAIL: {e}")
 
-        log.info(f"  Summary: {placed} placed | cooldown:{skipped['cooldown']} "
+        log.info(f"  Summary: {placed} placed | "
+                 f"bt_fail:{skipped['bt_fail']} cooldown:{skipped['cooldown']} "
                  f"pending:{skipped['already_pending']} stale:{skipped['stale']} "
                  f"coherent:{skipped['coherence']} profit:{skipped['profit']} "
                  f"held:{skipped['holds']}")
