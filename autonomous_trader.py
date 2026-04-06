@@ -49,16 +49,24 @@ class State:
 
     def _load(self):
         try:
+            # Cancel all old resting orders from DB (from previous runs)
+            self.conn.execute(
+                "UPDATE trades SET status='cancelled_restart' "
+                "WHERE status='resting' AND ts < ?",
+                (int(time.time()) - 300,))
+            self.conn.commit()
+
             rows = self.conn.execute(
                 "SELECT ticker,side,price_cents,ts FROM trades "
                 "WHERE status='executed' ORDER BY ts DESC").fetchall()
-            for t, s, p, ts in rows:
+            for t, s, p, ts in rows[:50]:
                 if t not in self.filled:
                     self.filled[t] = [(ts, s, p)]
+
             rows = self.conn.execute(
                 "SELECT ticker,side,price_cents,ts,order_id "
                 "FROM trades WHERE status='resting' ORDER BY ts DESC").fetchall()
-            for t, s, p, ts, oid in rows:
+            for t, s, p, ts, oid in rows[:10]:
                 if t not in self.pending:
                     self.pending[t] = dict(order_id=oid, ts=ts, cents=p,
                                            side=s, stale_cycles=0)
@@ -92,6 +100,18 @@ class State:
     def stale_tickers(self, max_cycles=MAX_STALE_CYCLES) -> list:
         return [t for t, p in self.pending.items()
                 if p["stale_cycles"] >= max_cycles]
+
+    def purge_stale(self, max_cycles=MAX_STALE_CYCLES) -> list:
+        """Remove stale orders from pending state."""
+        stale = self.stale_tickers(max_cycles)
+        for t in stale:
+            self.pending.pop(t, None)
+            # Mark as cancelled_in_memory in DB so they don't reload
+            self.conn.execute(
+                "UPDATE trades SET status='cancelled_stale' WHERE status='resting' AND ticker=?",
+                (t,))
+            self.conn.commit()
+        return stale
 
     def portfolio_coherent(self, ticker: str, side: str) -> tuple:
         """Rule 4: no opposing positions on same underlying."""
@@ -229,11 +249,10 @@ class Trader:
 
         # Bump stale counters
         self.state.tick_stale()
-        stale = self.state.stale_tickers()
-        if stale:
-            log.warning(f"  STALE ORDERS ({len(stale)}): {', '.join(stale[:5])}")
-            for t in stale:
-                log.warning(f"    {t}: not filled after {MAX_STALE_CYCLES} cycles — skipping")
+        # Purge stale orders so they don't block new trades
+        purged = self.state.purge_stale()
+        if purged:
+            log.warning(f"  PURGED {len(purged)} stale orders: {', '.join(purged[:5])}")
 
         mkts = self.fetch_markets()
         log.info(f"  Fetched {len(mkts)} open markets")
@@ -343,8 +362,8 @@ class Trader:
                 skipped["already_pending"] += 1
                 continue
 
-            # Rule 3: Stale order — skip entirely
-            if ticker in [t for t in self.state.stale_tickers()]:
+            # Rule 3: Stale check (redundant after purge, but safety net)
+            if self.state.stale_tickers() and ticker in self.state.stale_tickers():
                 skipped["stale"] += 1
                 continue
 

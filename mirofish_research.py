@@ -11,7 +11,8 @@ import os, sys, time, json, sqlite3, math, random
 from datetime import datetime, timezone
 from pathlib import Path
 import requests
-
+sys.path.insert(0, str(Path(__file__).parent))
+import backtest_validation_layer as vlayer
 DB = os.path.expanduser("~/alpha_trader/data/autonomous.db")
 LOG = os.path.expanduser("~/alpha_trader/logs/mirofish_research.log")
 
@@ -208,7 +209,7 @@ def main():
         time.sleep(300)
         return
     
-    print(f"\n[2/3] Deep-scanning top 5 uncovered series...")
+    print(f"\n[2/3] Deep-scanning top 5 uncovered series (with backtest validation)...")
     all_signals = []
     
     for d in discoveries[:5]:
@@ -222,12 +223,26 @@ def main():
             for m in mkts:
                 sig = analyze_opportunity(m, swarm)
                 if sig:
-                    all_signals.append(sig)
+                    # ── BACKTEST VALIDATION HOOK ──
+                    side = "yes" if sig["rec"] == "buy_yes" else "no"
+                    strat = "near_zero_no" if side == "no" else "buy_yes_cheap"
+                    pc = sig["ask_cents"] if side == "yes" else sig["bid_cents"]
+                    passed, bt_stats, bt_reason = vlayer.validate_signal(
+                        sig["ticker"], side, strat, pc)
+                    if passed:
+                        sig["bt_passed"] = True
+                        sig["bt_stats"] = bt_stats
+                        sig["bt_reason"] = bt_reason
+                        all_signals.append(sig)
+                        print(f"  ✅ BT PASS: {sig['ticker']} WR={bt_stats.get('bt_win_rate',0):.0%} PnL={bt_stats.get('bt_total_pnl',0):+.0f}c")
+                    else:
+                        print(f"  ❌ BT FAIL: {sig['ticker']} — {bt_reason}")
             time.sleep(0.05)
         except: pass
     
-    all_signals.sort(key=lambda s: s["score"], reverse=True)
-    print(f"  Found {len(all_signals)} alpha signals in uncovered series")
+    # Sort: BT-passed signals with highest score first
+    all_signals.sort(key=lambda s: s.get("score", 0), reverse=True)
+    print(f"  Found {len(all_signals)} BT-validated alpha signals")
     
     ts = int(time.time())
     for s in all_signals[:20]:
