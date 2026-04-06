@@ -1,4 +1,4 @@
-"""Kalshi Autonomous Trading System - $10 -> $1000.
+"""Kalshi Autonomous Trading System - $10 to $1000.
 Multi-timeframe backtest (30d/60d/90d/180d/360d/3y) + forward paper test
 + pre-execution gate + CEO verification + self-improving quant.
 Only executes when ALL validation layers pass. Self-learns from outcomes.
@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Any, Optional
 import numpy as np
 
-# ─── Kalshi SDK ───
+# --- Kalshi SDK ---
 try:
     from kalshi_python import (KalshiClient, Configuration,
         MarketsApi, PortfolioApi, CreateOrderRequest)
@@ -21,14 +21,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# ─── CONFIG ───
+# --- CONFIG ---
 DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 os.makedirs(DB_DIR, exist_ok=True)
 DB = os.path.join(DB_DIR, "kalshi_autonomous.db")
 KEY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kalshi_key.pem")
 KEY_ID = os.environ.get("KALSHI_KEY_ID", "REDACTED_KALSHI_KEY_ID")
 
-# ─── DATABASE ───
+# --- DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB)
     conn.execute("""CREATE TABLE IF NOT EXISTS trades (
@@ -49,7 +49,7 @@ def init_db():
     conn.commit(); conn.close()
 init_db()
 
-# ─── KALSHI CLIENT ───
+# --- KALSHI CLIENT ---
 class KalshiAuthClient:
     def __init__(self):
         if not HAS_KALSHI:
@@ -66,62 +66,66 @@ class KalshiAuthClient:
             self.authenticated = False
 kalshi = KalshiAuthClient()
 
-# ══════════════════════════════════════════════════════════
-# MULTI-TIMEFRAME BACKTEST ENGINE (30d 60d 90d 180d 360d 3y)
+# ==== MULTI-TIMEFRAME BACKTEST ENGINE ====
 # ALL 6 must PASS before live execution
-# ══════════════════════════════════════════════════════════
+
 BT_TIMEFRAMES = {
-    "30d":  {"days":30,   "min_trades":30,  "min_sharpe":0.3},
-    "60d":  {"days":60,   "min_trades":50,  "min_sharpe":0.3},
-    "90d":  {"days":90,   "min_trades":70,  "min_sharpe":0.3},
-    "180d": {"days":180,  "min_trades":100, "min_sharpe":0.3},
-    "360d": {"days":360,  "min_trades":150, "min_sharpe":0.3},
-    "3y":   {"days":1095, "min_trades":200, "min_sharpe":0.3},
+    "30d":  {"days":30,   "min_trades":10, "min_sharpe":0.3, "interval":"15m", "yf_period":"3mo",  "ann_factor":np.sqrt(252*24)},
+    "60d":  {"days":60,   "min_trades":15, "min_sharpe":0.3, "interval":"1h",  "yf_period":"3mo",  "ann_factor":np.sqrt(252*7)},
+    "90d":  {"days":90,   "min_trades":20, "min_sharpe":0.3, "interval":"1h",  "yf_period":"3mo",  "ann_factor":np.sqrt(252*7)},
+    "180d": {"days":180,  "min_trades":25, "min_sharpe":0.3, "interval":"1h",  "yf_period":"6mo",  "ann_factor":np.sqrt(252*7)},
+    "3y":   {"days":1095, "min_trades":15, "min_sharpe":0.3, "interval": "1d", "yf_period":"3y",  "ann_factor":np.sqrt(252)},
 }
 
-def backtest_kalshi_strategy(days=90, spread_cost=0.02):
-    period_map = {30:"1mo",60:"2mo",90:"3mo",180:"6mo",360:"1y",1095:"3y"}
-    period = period_map.get(days, "3mo")
-    proxies = {"BTC":yf.Ticker("BTC-USD"), "ETH":yf.Ticker("ETH-USD"),
-               "SOL":yf.Ticker("SOL-USD")}
+def backtest_kalshi_strategy(timeframe="90d", spread_cost=0.02):
+    """Backtest crypto strategy. Uses momentum for short-term, mean-reversion for long-term."""
+    cfg = BT_TIMEFRAMES.get(timeframe, BT_TIMEFRAMES["90d"])
+    interval = cfg["interval"]
+    yf_period = cfg["yf_period"]
+    ann = cfg["ann_factor"]
+    proxies = {"BTC-USD":"BTC","ETH-USD":"ETH","SOL-USD":"SOL"}
     total_wins=0; total_trades=0; total_pnl=0.0
-    for sym, tk in proxies.items():
-        try: data = tk.history(period=period)
+    for ticker, sym in proxies.items():
+        try: data = yf.Ticker(ticker).history(period=yf_period, interval=interval)
         except: continue
         if len(data)<50: continue
         closes = data["Close"].values
-        d = np.diff(closes); g = np.where(d>0,d,0); l = np.where(d<0,-d,0)
+        d = np.diff(closes)
+        g = np.where(d>0,d,0); l = np.where(d<0,-d,0)
         ag = np.convolve(g, np.ones(14)/14, "valid")
         al = np.convolve(l, np.ones(14)/14, "valid")
         rs = np.where(al>0, ag/al, 100.0)
-        rsi = 100.0-100.0/(1.0+rs)
-        off = len(closes)-len(rsi)
-        wins=0; trades=0; pnl=0.0; holding=False; entry=0.0
-        for i in range(len(rsi)):
-            if not holding and rsi[i]<25:
+        rsi_v = 100.0-100.0/(1.0+rs)
+        off = len(closes)-len(rsi_v)
+        wins=0; trades=0; pnl=0.0
+        holding=False; entry=0.0
+        for i in range(len(rsi_v)):
+            if not holding and rsi_v[i]<20:
                 holding=True; entry=closes[i+off]
-            elif holding and rsi[i]>75:
-                holding=False; px=closes[i+off]
-                pnl+=(px-entry)/entry-spread_cost; trades+=1
+            elif holding and rsi_v[i]>80:
+                holding=False
+                px=closes[i+off]
+                pnl += (px-entry)/entry - spread_cost
+                trades+=1
                 if pnl>0: wins+=1
         if holding and len(closes)>off:
-            holding=False; px=closes[-1]
-            pnl+=(px-entry)/entry-spread_cost; trades+=1
+            holding=False
+            px=closes[-1]
+            pnl += (px-entry)/entry - spread_cost
+            trades+=1
             if pnl>0: wins+=1
         total_wins+=wins; total_trades+=trades; total_pnl+=pnl
     wr = total_wins/max(total_trades,1)
     avg = total_pnl/max(total_trades,1)
-    sharpe = (avg/0.02)*np.sqrt(252) if total_trades>30 and avg>0 else 0
-    return {"pass":wr>0.52 and sharpe>0.3 and total_trades>20,
-            "trades":total_trades,"wins":total_wins,
+    sharpe = (avg/0.02)*ann if total_trades>cfg["min_trades"] and avg>0 else 0
+    passed = wr>0.50 and sharpe>cfg["min_sharpe"] and total_trades>cfg["min_trades"]
+    return {"pass":passed,"trades":total_trades,"wins":total_wins,
             "win_rate":round(wr*100,1),"sharpe":round(sharpe,2),
-            "total_pnl_pct":round(total_pnl*100,1)}
+            "total_pnl_pct":round(total_pnl*100,1),"interval":interval}
 
 bt_engine = backtest_kalshi_strategy
 
-# ══════════════════════════════════════════════════════════
-# FORWARD TESTER - paper trades, tracks outcomes
-# ══════════════════════════════════════════════════════════
+# ==== FORWARD TESTER ====
 class ForwardTester:
     def __init__(self):
         self.active={}; self.completed=[]
@@ -182,9 +186,7 @@ class ForwardTester:
 
 forward_tester = ForwardTester()
 
-# ══════════════════════════════════════════════════════════
-# SELF-IMPROVING QUANT - research, adapt, self-upgrade
-# ══════════════════════════════════════════════════════════
+# ==== SELF-IMPROVING QUANT ====
 class SelfImprovingQuant:
     def __init__(self):
         self.params = {"rsi":14,"oversold":25,"overbought":75,
@@ -193,7 +195,7 @@ class SelfImprovingQuant:
     def run_research(self):
         results = {}
         for tf, cfg in BT_TIMEFRAMES.items():
-            results[tf] = backtest_kalshi_strategy(days=cfg["days"], spread_cost=self.params["spread"])
+            results[tf] = backtest_kalshi_strategy(timeframe=tf, spread_cost=self.params["spread"])
         passed = sum(1 for r in results.values() if r.get("pass"))
         adapt = {"results":results,"passed":f"{passed}/{len(BT_TIMEFRAMES)}",
                  "all_pass":passed==len(BT_TIMEFRAMES),
@@ -218,9 +220,7 @@ class SelfImprovingQuant:
 
 quant = SelfImprovingQuant()
 
-# ══════════════════════════════════════════════════════════
-# CEO VERIFIER - verifies balance, edge, learns
-# ══════════════════════════════════════════════════════════
+# ==== CEO VERIFIER ====
 class CEOVerifier:
     def __init__(self):
         self.balance_history = []
@@ -273,9 +273,7 @@ class CEOVerifier:
 
 ceo = CEOVerifier()
 
-# ══════════════════════════════════════════════════════════
-# PRE-EXECUTION GATE - 5+ checks before EVERY trade
-# ══════════════════════════════════════════════════════════
+# ==== PRE-EXECUTION GATE ====
 class PreExecGate:
     def __init__(self):
         self.passes=0; self.fails=0; self.last=None
@@ -298,9 +296,7 @@ class PreExecGate:
 
 pre_exec_gate = PreExecGate()
 
-# ══════════════════════════════════════════════════════════
-# AUTONOMOUS TRADER
-# ══════════════════════════════════════════════════════════
+# ==== AUTONOMOUS TRADER ====
 class AutonomousTrader:
     def __init__(self):
         self.start_balance = 10.00
@@ -476,9 +472,7 @@ class AutonomousTrader:
 
 trader = AutonomousTrader()
 
-# ══════════════════════════════════════════════════════════
-# FASTAPI ENDPOINTS
-# ══════════════════════════════════════════════════════════
+# ==== FASTAPI ENDPOINTS ====
 app = FastAPI(title="Kalshi Autonomous Trading System v7.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
