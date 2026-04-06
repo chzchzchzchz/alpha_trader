@@ -14,11 +14,11 @@ except ImportError:
 KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 
-def fetch_all_markets(status: str = "open") -> list:
-    """Fetch all markets with pagination."""
+def fetch_markets_sample(status: str = "open", max_pages: int = 5) -> list:
+    """Fetch a sample of markets (first N pages)."""
     markets = []
     cursor = ""
-    while True:
+    for page in range(max_pages):
         url = f"{KALSHI_BASE}/markets?limit=200"
         if status:
             url += f"&status={status}"
@@ -27,19 +27,32 @@ def fetch_all_markets(status: str = "open") -> list:
         try:
             r = requests.get(url, timeout=15)
             if r.status_code != 200:
-                print(f"Error fetching markets: {r.status_code} - {r.text[:200]}")
-                return markets
+                print(f"  Page {page+1} error: {r.status_code}")
+                break
             data = r.json()
             page_markets = data.get("markets", [])
             markets.extend(page_markets)
+            print(f"  Page {page+1}: {len(page_markets)} markets")
             cursor = data.get("cursor", "")
             if not cursor or not page_markets:
                 break
-            time.sleep(0.1)  # Rate limit
+            time.sleep(0.05)
         except Exception as e:
-            print(f"Fetch error: {e}")
+            print(f"  Fetch error page {page+1}: {e}")
             break
     return markets
+
+
+def fetch_markets_by_series(series: str, status: str = "open") -> list:
+    """Fetch markets for a specific series."""
+    url = f"{KALSHI_BASE}/markets?series_ticker={series}&limit=200&status={status}"
+    try:
+        r = requests.get(url, timeout=15)
+        if r.status_code == 200:
+            return r.json().get("markets", [])
+    except:
+        pass
+    return []
 
 
 def fetch_orderbook(ticker: str) -> dict:
