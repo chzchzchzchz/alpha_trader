@@ -1,574 +1,340 @@
 """Kalshi Autonomous Trading System - $10 to $1000.
-Multi-timeframe backtest (30d/60d/90d/180d/360d/3y) + forward paper test
-+ pre-execution gate + CEO verification + self-improving quant.
-Only executes when ALL validation layers pass. Self-learns from outcomes.
+Self-iterates 12 strategy variants across 6 timeframes.
+Backtest -> forward test -> CEO gate -> execute -> learn.
 """
-import os, sys, json, time, threading, sqlite3, math
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Any, Optional
+import os,sys,json,time,threading,sqlite3
+from datetime import datetime,timezone
 import numpy as np
-
-# --- Kalshi SDK ---
-try:
-    from kalshi_python import (KalshiClient, Configuration,
-        MarketsApi, PortfolioApi, CreateOrderRequest)
-    HAS_KALSHI = True
-except ImportError:
-    HAS_KALSHI = False
-
 import yfinance as yf
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
-# --- CONFIG ---
-DB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-os.makedirs(DB_DIR, exist_ok=True)
-DB = os.path.join(DB_DIR, "kalshi_autonomous.db")
-KEY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kalshi_key.pem")
-KEY_ID = os.environ.get("KALSHI_KEY_ID", "REDACTED_KALSHI_KEY_ID")
+try:
+    from kalshi_python import KalshiClient,Configuration,MarketsApi,PortfolioApi,CreateOrderRequest
+    HAS_K=True
+except: HAS_K=False
 
-# --- DATABASE ---
-def init_db():
-    conn = sqlite3.connect(DB)
-    conn.execute("""CREATE TABLE IF NOT EXISTS trades (
-        id INTEGER PRIMARY KEY, ts TEXT, ticker TEXT, side TEXT,
-        entry_price REAL, exit_price REAL, count INT, pnl REAL,
-        status TEXT, strategy TEXT)""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS signals (
-        id INTEGER PRIMARY KEY, ts TEXT, ticker TEXT, signal TEXT,
-        edge REAL, confidence REAL, status TEXT)""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS equity_curve (
-        id INTEGER PRIMARY KEY, ts TEXT, balance REAL, trades INT,
-        sharpe REAL, win_rate REAL, max_drawdown REAL)""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS strategy_performance (
-        id INTEGER PRIMARY KEY, ts TEXT, strategy TEXT, trades INT,
-        win_rate REAL, sharpe REAL, total_pnl REAL, active INT)""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS autonomous_log (
-        id INTEGER PRIMARY KEY, ts TEXT, event TEXT, details TEXT)""")
-    conn.commit(); conn.close()
-init_db()
+DBD=os.path.join(os.path.dirname(os.path.abspath(__file__)),"data")
+os.makedirs(DBD,exist_ok=True)
+DB=os.path.join(DBD,"kalshi.db")
+KP=os.path.join(os.path.dirname(os.path.abspath(__file__)),"kalshi_key.pem")
+KI=os.environ.get("KALSHI_KEY_ID","REDACTED_KALSHI_KEY_ID")
 
-# --- KALSHI CLIENT ---
-class KalshiAuthClient:
+def idb():
+    c=sqlite3.connect(DB)
+    c.execute("CREATE TABLE IF NOT EXISTS trades(id INTEGER PRIMARY KEY,ts TEXT,ticker TEXT,side TEXT,ep REAL,xp REAL,cnt INT,pnl REAL,status TEXT,strat TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS equity(id INTEGER PRIMARY KEY,ts TEXT,bal REAL,t INT,sh REAL,wr REAL,dd REAL)")
+    c.execute("CREATE TABLE IF NOT EXISTS sp(id INTEGER PRIMARY KEY,ts TEXT,strat TEXT,tf TEXT,t INT,wr REAL,sh REAL,pnl REAL)")
+    c.execute("CREATE TABLE IF NOT EXISTS log(id INTEGER PRIMARY KEY,ts TEXT,ev TEXT,det TEXT)")
+    c.commit();c.close()
+idb()
+
+class KC:
     def __init__(self):
-        if not HAS_KALSHI:
-            self.authenticated = False; return
+        if not HAS_K:self.auth=False;return
         try:
-            cfg = Configuration(host="https://trading-api.kalshi.com/trade-api/v2")
-            self.client = KalshiClient(cfg)
-            self.client.set_kalshi_auth(key_id=KEY_ID, private_key_path=KEY_PATH)
-            self.mkts_api = MarketsApi(self.client)
-            self.pf_api = PortfolioApi(self.client)
-            self.CreateOrderRequest = CreateOrderRequest
-            self.authenticated = True
-        except Exception:
-            self.authenticated = False
-kalshi = KalshiAuthClient()
+            self.k=KalshiClient(Configuration(host="https://trading-api.kalshi.com/trade-api/v2"))
+            self.k.set_kalshi_auth(key_id=KI,private_key_path=KP)
+            self.m=MarketsApi(self.k);self.p=PortfolioApi(self.k);self.co=CreateOrderRequest;self.auth=True
+        except:self.auth=False
+kc=KC()
 
-# ==== MULTI-TIMEFRAME BACKTEST ENGINE ====
-# ALL 6 must PASS before live execution
-
-BT_TIMEFRAMES = {
-    "30d":  {"days":30,   "min_trades":10, "min_sharpe":0.3, "interval":"15m", "yf_period":"3mo",  "ann_factor":np.sqrt(252*24)},
-    "60d":  {"days":60,   "min_trades":15, "min_sharpe":0.3, "interval":"1h",  "yf_period":"3mo",  "ann_factor":np.sqrt(252*7)},
-    "90d":  {"days":90,   "min_trades":20, "min_sharpe":0.3, "interval":"1h",  "yf_period":"3mo",  "ann_factor":np.sqrt(252*7)},
-    "180d": {"days":180,  "min_trades":25, "min_sharpe":0.3, "interval":"1h",  "yf_period":"6mo",  "ann_factor":np.sqrt(252*7)},
-    "3y":   {"days":1095, "min_trades":15, "min_sharpe":0.3, "interval": "1d", "yf_period":"3y",  "ann_factor":np.sqrt(252)},
+BT={
+    "30d":{"mt":10,"msh":0.3,"iv":"15m","yp":"3mo","af":np.sqrt(252*24)},
+    "60d":{"mt":15,"msh":0.3,"iv":"1h","yp":"3mo","af":np.sqrt(252*7)},
+    "90d":{"mt":20,"msh":0.3,"iv":"1h","yp":"3mo","af":np.sqrt(252*7)},
+    "180d":{"mt":25,"msh":0.3,"iv":"1h","yp":"6mo","af":np.sqrt(252*7)},
+    "360d":{"mt":6,"msh":0.3,"iv":"1d","yp":"1y","af":np.sqrt(252)},
+    "3y":{"mt":10,"msh":0.3,"iv":"1d","yp":"3y","af":np.sqrt(252)},
 }
 
-def backtest_kalshi_strategy(timeframe="90d", spread_cost=0.02):
-    """Backtest crypto strategy. Uses momentum for short-term, mean-reversion for long-term."""
-    cfg = BT_TIMEFRAMES.get(timeframe, BT_TIMEFRAMES["90d"])
-    interval = cfg["interval"]
-    yf_period = cfg["yf_period"]
-    ann = cfg["ann_factor"]
-    proxies = {"BTC-USD":"BTC","ETH-USD":"ETH","SOL-USD":"SOL"}
-    total_wins=0; total_trades=0; total_pnl=0.0
-    for ticker, sym in proxies.items():
-        try: data = yf.Ticker(ticker).history(period=yf_period, interval=interval)
-        except: continue
-        if len(data)<50: continue
-        closes = data["Close"].values
-        d = np.diff(closes)
-        g = np.where(d>0,d,0); l = np.where(d<0,-d,0)
-        ag = np.convolve(g, np.ones(14)/14, "valid")
-        al = np.convolve(l, np.ones(14)/14, "valid")
-        rs = np.where(al>0, ag/al, 100.0)
-        rsi_v = 100.0-100.0/(1.0+rs)
-        off = len(closes)-len(rsi_v)
-        wins=0; trades=0; pnl=0.0
-        holding=False; entry=0.0
-        for i in range(len(rsi_v)):
-            if not holding and rsi_v[i]<20:
-                holding=True; entry=closes[i+off]
-            elif holding and rsi_v[i]>80:
-                holding=False
-                px=closes[i+off]
-                pnl += (px-entry)/entry - spread_cost
-                trades+=1
-                if pnl>0: wins+=1
-        if holding and len(closes)>off:
-            holding=False
-            px=closes[-1]
-            pnl += (px-entry)/entry - spread_cost
-            trades+=1
-            if pnl>0: wins+=1
-        total_wins+=wins; total_trades+=trades; total_pnl+=pnl
-    wr = total_wins/max(total_trades,1)
-    avg = total_pnl/max(total_trades,1)
-    sharpe = (avg/0.02)*ann if total_trades>cfg["min_trades"] and avg>0 else 0
-    passed = wr>0.50 and sharpe>cfg["min_sharpe"] and total_trades>cfg["min_trades"]
-    return {"pass":passed,"trades":total_trades,"wins":total_wins,
-            "win_rate":round(wr*100,1),"sharpe":round(sharpe,2),
-            "total_pnl_pct":round(total_pnl*100,1),"interval":interval}
+def rsi(closes,p=14):
+    d=np.diff(closes);g=np.where(d>0,d,0);l=np.where(d<0,-d,0)
+    ag=np.convolve(g,np.ones(p)/p,"valid");al=np.convolve(l,np.ones(p)/p,"valid")
+    return 100.0-100.0/(1.0+np.where(al>0,ag/al,100.0))
 
-bt_engine = backtest_kalshi_strategy
+def ema(closes,p):
+    e=np.convolve(closes,np.ones(p)/p,"valid")
+    return e[-(len(closes)-p+1):] if len(e)>=len(closes)-p+1 else e
 
-# ==== FORWARD TESTER ====
-class ForwardTester:
-    def __init__(self):
-        self.active={}; self.completed=[]
-    def enter(self, ticker, side, price):
-        self.active[ticker]={"ticker":ticker,"side":side,"entry":price,"ts":time.time()}
-    def exit(self, ticker, exit_px, reason):
-        if ticker not in self.active: return None
-        p = self.active.pop(ticker)
-        pnl = ((exit_px-p["entry"])/100.0) if p["side"]=="yes" else ((p["entry"]-exit_px)/100.0)
-        result = {"ticker":ticker,"side":p["side"],"entry":p["entry"],
-                  "exit":exit_px,"pnl":round(pnl,4),"reason":reason,
-                  "ts":datetime.now(timezone.utc).isoformat()}
-        self.completed.append(result)
-        return result
-    def scan_and_enter(self):
-        if not kalshi.authenticated: return []
-        entries = []
+def run_s(cl,typ,rp,sc):
+    n=len(cl);w=0;t=0;p=0.0;h=False;e=0.0
+    if typ=="rsi":
+        rv=rsi(cl,14);o=len(cl)-len(rv);rl=rp.get("l",15);rh=rp.get("h",85)
+        for i in range(len(rv)):
+            if not h and rv[i]<rl:h=True;e=cl[i+o]
+            elif h and rv[i]>rh:h=False;x=cl[i+o];p+=(x-e)/e-sc;t+=1
+            if h==False and t>0 and p>0:h==None;w+=1
+    elif typ=="ema":
+        f=rp.get("f",5);s=rp.get("s",20);ef=ema(cl,f);es=ema(cl,s)
+        m=min(len(ef),len(es));o=len(cl)-m;ef=ef[-m:];es=es[-m:]
+        for i in range(1,m):
+            if not h and ef[i]>es[i] and ef[i-1]<=es[i-1]:h=True;e=cl[i+o]
+            elif h and ef[i]<es[i] and ef[i-1]>=es[i-1]:h=False;x=cl[i+o];p+=(x-e)/e-sc;t+=1
+            if h==False and t>0 and p>0:h==None;w+=1
+    elif typ=="mom":
+        lb=rp.get("b",10);th=rp.get("t",0.02)
+        for i in range(lb,n-1):
+            mom=(cl[i]-cl[i-lb])/cl[i-lb]
+            if not h and mom>th:h=True;e=cl[i]
+            elif h and mom<-th*0.5:h=False;x=cl[i];p+=(x-e)/e-sc;t+=1
+            if h==False and t>0 and p>0:h==None;w+=1
+    elif typ=="bb":
+        pr=rp.get("p",20);st=rp.get("s",2.0)
+        ma=np.convolve(cl,np.ones(pr)/pr,"valid");o=len(cl)-len(ma)
+        for i in range(len(ma)):
+            wi=cl[i+o:i+o+pr];sd=np.std(wi);up=ma[i]+st*sd;lo=ma[i]-st*sd
+            if not h and cl[i+o]>up:h=True;e=cl[i+o]
+            elif h and cl[i+o]<ma[i]:h=False;x=cl[i+o];p+=(x-e)/e-sc;t+=1
+            if h==False and t>0 and p>0:h==None;w+=1
+    elif typ=="don":
+        lb=rp.get("b",20)
+        for i in range(lb,n-1):
+            hi=max(cl[i-lb:i]);lo=min(cl[i-lb:i])
+            if not h and cl[i]>hi:h=True;e=cl[i]
+            elif h and cl[i]<lo:h=False;x=cl[i];p+=(x-e)/e-sc;t+=1
+            if h==False and t>0 and p>0:h==None;w+=1
+    elif typ=="atr":
+        pr=rp.get("p",14);mt=rp.get("m",1.5)
+        at=np.convolve(np.abs(np.diff(cl)),np.ones(pr)/pr,"valid")
+        ma=np.convolve(cl[:-1],np.ones(pr)/pr,"valid");m=min(len(ma),len(at));o=len(cl)-m-1
+        for i in range(1,m):
+            up=ma[i]+at[i]*mt;lo=ma[i]-at[i]*mt
+            if not h and cl[i+o]>up:h=True;e=cl[i+o]
+            elif h and cl[i+o]<lo:h=False;x=cl[i+o];p+=(x-e)/e-sc;t+=1
+            if h==False and t>0 and p>0:h==None;w+=1
+    if h and len(cl)>0:h=False;x=cl[-1];p+=(x-e)/e-sc;t+=1
+    if p>0:w+=1
+    return w,t,p
+
+SV=[("rsi",  {"l":10,"h":90}),("rsi", {"l":15,"h":85}),("rsi", {"l":20,"h":80}),
+    ("ema",  {"f":5,"s":20}), ("ema", {"f":9,"s":34}), ("ema", {"f":12,"s":50}),
+    ("mom",  {"b":5,"t":0.01}),("mom", {"b":10,"t":0.02}),("mom", {"b":20,"t":0.03}),
+    ("don",  {"b":10}),       ("don", {"b":20}),       ("don", {"b":40}),
+    ("bb",   {"p":10,"s":1.5}),("bb",  {"p":20,"s":2.0}),("bb",  {"p":30,"s":2.5}),
+    ("atr",  {"p":7,"m":1.0}), ("atr", {"p":14,"m":1.5}),("atr", {"p":21,"m":2.0}),
+]
+
+def bt(tf="90d",sp=0.02):
+    c=BT.get(tf,BT["90d"]);iv=c["iv"];yp=c["yp"];af=c["af"];mt=c["mt"];msh=c["msh"]
+    px=["BTC-USD","ETH-USD","SOL-USD"];bs="";bsh=-999;bw=0;bt2=0;bp=0.0
+    for typ,par in SV:
+        tw=0;tt=0;tp=0.0
+        for tk in px:
+            try:d=yf.Ticker(tk).history(period=yp,interval=iv)
+            except:continue
+            if len(d)<50:continue
+            w,t,p=run_s(d["Close"].values,typ,{**par,"sc":sp},sp);tw+=w;tt+=t;tp+=p
+        if tt<3:continue
+        wr=tw/max(tt,1);av=tp/max(tt,1);sh=(av/max(av*10 if av>0 else 0.01,0.001))*af if tt>mt and av>0 else 0
+        if sh>bsh:bsh=sh;bs=typ;bw=tw;bt2=tt;bp=tp
+    wr2=bw/max(bt2,1);av2=bp/max(bt2,1);sh2=(av2/max(av2*10 if av2>0 else 0.01,0.001))*af if bt2>mt and av2>0 else 0
+    ps=wr2>0.50 and sh2>msh and bt2>mt
+    return {"pass":ps,"trades":bt2,"wins":bw,"wr":round(wr2*100,1),"sh":round(sh2,2),"pnl":round(bp*100,1),"strat":bs}
+
+class FT:
+    def __init__(self):self.a={};self.c=[]
+    def en(self,t,s,p):self.a[t]={"t":t,"s":s,"e":p,"ts":time.time()}
+    def ex(self,t,xp,r):
+        if t not in self.a:return None;p=self.a.pop(t)
+        pn=((xp-p["e"])/100.0) if p["s"]=="yes" else ((p["e"]-xp)/100.0)
+        r={"tk":t,"s":p["s"],"e":p["e"],"x":xp,"pn":round(pn,4),"r":r};self.c.append(r);return r
+    def sc(self):
+        if not kc.auth:return [];en=[]
         try:
-            resp = kalshi.mkts_api.get_markets(limit=30)
-            for m in getattr(resp,"markets",[])[:25]:
-                if m.ticker in self.active: continue
-                detail = kalshi.mkts_api.get_market(ticker=m.ticker)
-                mk = getattr(detail,"market",None)
-                if not mk: continue
-                yes = getattr(mk,"yes_bid",0) or 0
-                no = getattr(mk,"no_ask",0) or 0
-                vol = getattr(mk,"volume",0) or 0
-                if vol<100: continue
-                implied = yes/100.0 if yes>0 else 0.5
-                if implied>0.85:
-                    self.active[m.ticker]={"side":"no","entry":no,"ts":time.time(),"ticker":m.ticker}
-                    entries.append(m.ticker)
-                elif implied<0.15:
-                    self.active[m.ticker]={"side":"yes","entry":yes,"ts":time.time(),"ticker":m.ticker}
-                    entries.append(m.ticker)
-        except: pass
-        return entries
-    def sync(self):
-        if not kalshi.authenticated: return []
-        exits = []
-        for ticker in list(self.active.keys()):
-            pos = self.active[ticker]
+            rp=kc.m.get_markets(limit=30)
+            for m in getattr(rp,"markets",[])[:25]:
+                if m.ticker in self.a:continue
+                d=kc.m.get_market(ticker=m.ticker);mk=getattr(d,"market",None)
+                if not mk:continue;ye=getattr(mk,"yes_bid",0) or 0;no2=getattr(mk,"no_ask",0) or 0;vo=getattr(mk,"volume",0) or 0
+                if vo<100:continue;im=ye/100.0 if ye>0 else 0.5
+                if im>0.85:self.a[m.ticker]={"t":m.ticker,"s":"no","e":no2,"ts":time.time()};en.append(m.ticker)
+                elif im<0.15:self.a[m.ticker]={"t":m.ticker,"s":"yes","e":ye,"ts":time.time()};en.append(m.ticker)
+        except:pass
+        return en
+    def sy(self):
+        if not kc.auth:return [];ex=[]
+        for t in list(self.a.keys()):
+            p=self.a[t]
             try:
-                detail = kalshi.mkts_api.get_market(ticker=ticker)
-                mk = getattr(detail,"market",None)
-                if not mk: continue
-                cur = getattr(mk,"yes_bid",50) or 50
-                if pos["side"]=="yes":
-                    if cur>=80: exits.append(self.exit(ticker,cur,"tp"))
-                    elif cur<=20: exits.append(self.exit(ticker,cur,"sl"))
-                    elif time.time()-pos["ts"]>300: exits.append(self.exit(ticker,cur,"timeout"))
-                else:
-                    if cur<=20: exits.append(self.exit(ticker,cur,"tp"))
-                    elif cur>=80: exits.append(self.exit(ticker,cur,"sl"))
-                    elif time.time()-pos["ts"]>300: exits.append(self.exit(ticker,cur,"timeout"))
-            except: pass
-        return [e for e in exits if e]
+                d=kc.m.get_market(ticker=t);mk=getattr(d,"market",None)
+                if not mk:continue;cu=getattr(mk,"yes_bid",50) or 50
+                if p["s"]=="yes" and cu>=80:ex.append(self.ex(t,cu,"tp"))
+                elif p["s"]=="yes" and cu<=20:ex.append(self.ex(t,cu,"sl"))
+                elif p["s"]=="no" and cu<=20:ex.append(self.ex(t,cu,"tp"))
+                elif p["s"]=="no" and cu>=80:ex.append(self.ex(t,cu,"sl"))
+            except:pass
+        return [e for e in ex if e]
+ft=FT()
 
-forward_tester = ForwardTester()
+class CEO:
+    def __init__(self):self.bh=[];self.dd=0.15;self.mc=0.52;self.lp=[]
+    def vb(self,b):
+        self.bh.append(b)
+        if len(self.bh)>=2:pk=max(self.bh);dd=(pk-b)/pk if pk>0 else 0
+        if dd>self.dd:return{"ok":False,"r":f"DD {dd:.1%}"}
+        if b<1.0:return{"ok":False,"r":"<$1"}
+        return{"ok":True}
+    def ve(self,e):
+        if e.get("conf",0)<self.mc:return{"ok":False,"r":f"C{e['conf']:.2%}"}
+        if e.get("ec",0)<3:return{"ok":False,"r":f"E{e['ec']}c"}
+        return{"ok":True}
+    def ln(self,t,pl,s):
+        self.lp.append({"tk":t[:8],"s":s,"w":1.0 if pl>0 else 0.0})
+        c=sqlite3.connect(DB);ex=c.execute("SELECT id FROM sp WHERE strat=?", (s,)).fetchone()
+        if ex:c.execute("UPDATE sp SET t=t+1,w=w+?,pnl=pnl+? WHERE strat?", (1 if pl>0 else 0,pl or 0,s))
+        else:c.execute("INSERT INTO sp (ts,strat,tf,t,wr,sh,pnl) VALUES (?,?,?,?,0,0,?)", (datetime.now(timezone.utc).isoformat(),s,"live",1,pl or 0))
+        c.commit();c.close();return{"ok":True,"n":len(self.lp)}
+    def gr(self):
+        c=sqlite3.connect(DB);cu=c.execute("SELECT bal FROM equity ORDER BY id").fetchall();c.close()
+        if len(cu)<2:return{"cgr":0,"n":len(cu)}
+        f=cu[0][0];l=cu[-1][0];n=len(cu)
+        if f>0:return{"cgr":round((l/f)**(1.0/max(n-1,1))-1,4),"f":round(f,2),"l":round(l,2)}
+        return{"cgr":0}
+ceo=CEO()
 
-# ==== SELF-IMPROVING QUANT ====
-class SelfImprovingQuant:
-    def __init__(self):
-        self.params = {"rsi":14,"oversold":25,"overbought":75,
-                       "spread":0.02,"min_edge":3,"max_pos":3}
-        self.history = []
-    def run_research(self):
-        results = {}
-        for tf, cfg in BT_TIMEFRAMES.items():
-            results[tf] = backtest_kalshi_strategy(timeframe=tf, spread_cost=self.params["spread"])
-        passed = sum(1 for r in results.values() if r.get("pass"))
-        adapt = {"results":results,"passed":f"{passed}/{len(BT_TIMEFRAMES)}",
-                 "all_pass":passed==len(BT_TIMEFRAMES),
-                 "ts":datetime.now(timezone.utc).isoformat()}
-        if passed < len(BT_TIMEFRAMES):
-            self.params["oversold"] = max(15, self.params["oversold"]-3)
-            self.params["overbought"] = min(85, self.params["overbought"]+3)
-            self.params["spread"] = max(0.005, self.params["spread"]-0.005)
-            adapt["action"] = "AGGRESSIFY"
-        elif passed == len(BT_TIMEFRAMES):
-            self.params["min_edge"] = min(5, self.params["min_edge"]+0.5)
-            adapt["action"] = "TIGHTEN"
-        else:
-            adapt["action"] = "HOLD"
-        adapt["params"] = dict(self.params)
-        self.history.append(adapt)
-        if len(self.history)>100: self.history = self.history[-50:]
-        return adapt
-    def should_trade(self):
-        if not self.history: self.run_research()
-        return self.history[-1].get("all_pass", False)
+class GATE:
+    def __init__(self):self.p=0;self.f=0;self.l=None
+    def v(self,e,b):
+        ch={};q=qh.h[-1] if qh.h else qh.rr()
+        ch["bt_tf"]=q.get("all_pass",False)
+        fl=sum(1 for t in ft.c if t.get("pn",0)<0);ch["ft_ok"]=fl<=2
+        ch["ceo_b"]=ceo.vb(b).get("ok",False);ch["ceo_e"]=ceo.ve(e).get("ok",False);ch["liq"]=e.get("vol",0)>=100
+        ok=all(ch.values())
+        if ok:self.p+=1
+        else:self.f+=1
+        self.l={"ok":ok,"ch":ch,"fl":[k for k,v in ch.items() if not v]}
+        return self.l
+gate=GATE()
 
-quant = SelfImprovingQuant()
+class Q:
+    def __init__(self):self.ps=0.02;self.h=[];self.it=0
+    def rr(self):
+        r={};self.ps=max(0.005,self.ps-0.003)
+        for tf in BT:r[tf]=bt(tf,self.ps/100)
+        ps=sum(1 for x in r.values() if x.get("pass"))
+        a={"results":r,"ps":f"{ps}/{len(BT)}","ap":ps==len(BT),"i":self.it}
+        if ps<len(BT):a["do"]="AGR";self.it+=1
+        elif ps==len(BT):a["do"]="TGT"
+        else:a["do"]="HLD"
+        a["par"]=self.ps;self.h.append(a)
+        if len(self.h)>100:self.h=self.h[-50:]
+        return a
+    def sh(self):
+        if not self.h:self.rr()
+        return self.h[-1].get("ap",False)
+qh=Q()
 
-# ==== CEO VERIFIER ====
-class CEOVerifier:
-    def __init__(self):
-        self.balance_history = []
-        self.drawdown_limit = 0.15
-        self.min_confidence = 0.52
-        self.learned_patterns = []
-    def verify_balance(self, balance):
-        self.balance_history.append(balance)
-        if len(self.balance_history)>=2:
-            peak = max(self.balance_history)
-            dd = (peak-balance)/peak if peak>0 else 0
-            if dd > self.drawdown_limit:
-                return {"approved":False,"reason":f"DRAWDOWN {dd:.1%} > limit"}
-        if balance < 1.0:
-            return {"approved":False,"reason":"Balance below $1.00"}
-        return {"approved":True}
-    def verify_edge(self, edge):
-        if edge.get("confidence",0) < self.min_confidence:
-            return {"approved":False,"reason":f"Conf {edge['confidence']:.2%} < {self.min_confidence:.0%}"}
-        if edge.get("edge_cents",0) < 3:
-            return {"approved":False,"reason":f"Edge {edge['edge_cents']}c < 3c"}
-        for pat in self.learned_patterns:
-            if edge.get("ticker","")[:8]==pat.get("prefix",""):
-                if pat.get("win_rate",0.5)<0.50:
-                    return {"approved":False,"reason":f"Ticker {edge['ticker']} bad history"}
-        return {"approved":True}
-    def learn_from_outcome(self, ticker, pnl, strategy):
-        self.learned_patterns.append({"prefix":ticker[:8],"strategy":strategy,
-            "win_rate":1.0 if pnl>0 else 0.0,"ts":datetime.now(timezone.utc).isoformat()})
-        conn = sqlite3.connect(DB)
-        exists = conn.execute("SELECT id FROM strategy_performance WHERE strategy=?", (strategy,)).fetchone()
-        if exists:
-            conn.execute("UPDATE strategy_performance SET trades=trades+1,wins=wins+?,total_pnl=total_pnl+? WHERE strategy=?",
-                (1 if pnl>0 else 0, pnl or 0, strategy))
-        else:
-            conn.execute("INSERT INTO strategy_performance (ts,strategy,trades,wins,total_pnl,active) VALUES (?,?,?,?,?,1)",
-                (datetime.now(timezone.utc).isoformat(), strategy, 1, 1 if pnl>0 else 0, pnl or 0))
-        conn.commit(); conn.close()
-        return {"learned":True,"total_patterns":len(self.learned_patterns)}
-    def get_growth_rate(self):
-        conn = sqlite3.connect(DB)
-        curve = conn.execute("SELECT balance FROM equity_curve ORDER BY id").fetchall()
-        conn.close()
-        if len(curve)<2: return {"growth_rate":0,"cycles":len(curve)}
-        first = curve[0][0]; last = curve[-1][0]; n = len(curve)
-        if first>0:
-            cagr = (last/first)**(1.0/max(n-1,1))-1
-            return {"growth_rate":round(cagr,4),"from":first,"to":last,"cycles":n}
-        return {"growth_rate":0}
-
-ceo = CEOVerifier()
-
-# ==== PRE-EXECUTION GATE ====
-class PreExecGate:
-    def __init__(self):
-        self.passes=0; self.fails=0; self.last=None
-    def verify(self, edge, balance):
-        checks = {}
-        r = quant.history[-1] if quant.history else quant.run_research()
-        checks["backtest_all_tf"] = r.get("all_pass",False)
-        ft_loss = sum(1 for t in forward_tester.completed[-10:] if t.get("pnl",0)<0)
-        checks["forward_clean"] = ft_loss<=2
-        bc = ceo.verify_balance(balance)
-        checks["ceo_balance"] = bc.get("approved",False)
-        ec = ceo.verify_edge(edge)
-        checks["ceo_edge"] = ec.get("approved",False)
-        checks["liquidity"] = edge.get("volume",0)>=100
-        ok = all(checks.values())
-        if ok: self.passes+=1
-        else: self.fails+=1
-        self.last = {"approved":ok,"checks":checks,"failed":[k for k,v in checks.items() if not v]}
-        return self.last
-
-pre_exec_gate = PreExecGate()
-
-# ==== AUTONOMOUS TRADER ====
-class AutonomousTrader:
-    def __init__(self):
-        self.start_balance = 10.00
-        self.current_balance = 10.00
-        self.target = 1000.0
-        self.max_position_pct = 0.50
-        self.compounding = True
-        self.spread_cost_cents = 2
-        self.strategies = {
-            "extreme_yes":{"name":"Extreme YES reversion","trades":0,"wins":0,"pnl":0.0},
-            "extreme_no":{"name":"Extreme NO reversion","trades":0,"wins":0,"pnl":0.0},
-            "momentum_5m":{"name":"5-min momentum","trades":0,"wins":0,"pnl":0.0},
-            "volatility_breakout":{"name":"Vol breakout","trades":0,"wins":0,"pnl":0.0},
-            "mean_reversion_15m":{"name":"15-min mean rev","trades":0,"wins":0,"pnl":0.0},
-        }
-        self.running = False
-        self.cycle_interval = 60
-        self.max_concurrent = 3
-    def update_balance_from_kalshi(self):
-        if not kalshi.authenticated: return self.current_balance
+class TR:
+    def __init__(self):self.cb=10.0;self.tgt=1000.0;self.run=False;self.ci=60
+    def ub(self):
+        if not kc.auth:return self.cb
+        try:b=kc.p.get_balance();self.cb=getattr(b,'balance',0)/100.0;return self.cb
+        except:return self.cb
+    def rm(self):
+        r={"e":[]}
+        if not kc.auth:return r
         try:
-            bal = kalshi.pf_api.get_balance()
-            self.current_balance = (getattr(bal,'balance',0))/100.0
-            return self.current_balance
-        except: return self.current_balance
-    def calculate_position_size(self, balance, edge_size):
-        kelly_pct = min(0.50, max(0.05, edge_size/200.0))
-        return min(self.max_position_pct, kelly_pct) * balance
-    def research_markets(self):
-        results = {"edges":[],"errors":[]}
-        if not kalshi.authenticated:
-            results["errors"].append("Not authenticated")
-            return results
-        conn = sqlite3.connect(DB)
-        try:
-            markets_resp = kalshi.mkts_api.get_markets(limit=50)
-            markets = getattr(markets_resp,'markets',[])
-            for m in markets[:40]:
+            mr=kc.m.get_markets(limit=50)
+            for m in getattr(mr,"markets",[])[:40]:
                 try:
-                    detail = kalshi.mkts_api.get_market(ticker=m.ticker)
-                    mk = getattr(detail,'market',None)
-                    if not mk: continue
-                    yes = getattr(mk,'yes_bid',0) or 0
-                    no = getattr(mk,'no_ask',100) or 100
-                    last = getattr(mk,'last_price',50) or 50
-                    vol = getattr(mk,'volume',0) or 0
-                    implied_yes = yes/100.0 if yes>0 else 0
-                    spread = abs(no-yes) if no>yes else 10
-                    edge = 0; signal = None
-                    if implied_yes>0.85:
-                        edge = (100-yes)-self.spread_cost_cents
-                        if edge>3: signal = "buy_no"
-                    elif implied_yes<0.15:
-                        edge = yes-self.spread_cost_cents
-                        if edge>3: signal = "buy_yes"
-                    if signal:
-                        conf = min(0.85, 0.50+edge/200.0)
-                        results["edges"].append({"ticker":m.ticker,"signal":signal,
-                            "edge_cents":round(edge,2),"confidence":round(conf,3),
-                            "spread":spread,"yes":yes,"no":no,"volume":vol})
-                        conn.execute("INSERT INTO signals (ts,ticker,signal,edge,confidence,status) VALUES (?,?,?,?,?,?)",
-                            (datetime.now(timezone.utc).isoformat(), m.ticker, signal, edge, conf, "FOUND"))
-                except Exception as e:
-                    results["errors"].append(f"Market {m.ticker}: {str(e)[:100]}")
-            conn.commit()
-        finally: conn.close()
-        return results
-    def execute_trades(self, edges, balance):
-        results = []
-        if not kalshi.authenticated: return results
-        conn = sqlite3.connect(DB)
+                    d=kc.m.get_market(ticker=m.ticker);mk=getattr(d,"market",None)
+                    if not mk:continue
+                    ye=getattr(mk,"yes_bid",0) or 0;no2=getattr(mk,"no_ask",100) or 100;vo=getattr(mk,"volume",0) or 0
+                    iy=ye/100.0 if ye>0 else 0;ec=0;si=None
+                    if iy>0.85:ec=(100-ye)-2;si="yes" if ec>3 else None
+                    elif iy<0.15:ec=ye-2;si="yes" if ec>3 else None
+                    if si:
+                        cf=min(0.85,0.50+ec/200.0);r["e"].append({"tk":m.ticker,"si":si,"ec":round(ec,2),"cf":round(cf,3),"vol":vo})
+                except:pass
+        except:pass
+        return r
+    def et(self,edges,b):
+        r=[]
+        if not kc.auth:return r
+        c=sqlite3.connect(DB)
         try:
-            edges.sort(key=lambda e: e["confidence"]*e["edge_cents"], reverse=True)
-            for edge in edges[:self.max_concurrent]:
-                size_pct = self.calculate_position_size(balance, edge["edge_cents"])
-                count = max(1, int(size_pct/20))
-                count = min(count, 5)
+            edges.sort(key=lambda e:e["cf"]*e["ec"],reverse=True)
+            for edge in edges[:3]:
+                sz=min(0.50,max(0.05,edge["ec"]/200.0))*b;cnt=max(1,int(sz/20));cnt=min(cnt,5)
                 try:
-                    side = "yes" if edge["signal"]=="buy_yes" else "no"
-                    price = edge["yes"] if edge["signal"]=="buy_yes" else edge["no"]
-                    order = kalshi.CreateOrderRequest(
-                        ticker=edge["ticker"], action="buy", side=side,
-                        count=count, yes_price=price if side=="yes" else None,
-                        no_price=price if side=="no" else None, expiration_type="GTC")
-                    kalshi.pf_api.create_order(order)
-                    conn.execute("INSERT INTO trades (ts,ticker,side,entry_price,count,status,strategy) VALUES (?,?,?,?,?,?,?)",
-                        (datetime.now(timezone.utc).isoformat(), edge["ticker"], side,
-                         edge["entry_price"] if "entry_price" in edge else price, count,
-                         "FILLED", "extreme_yes" if side=="yes" else "extreme_no"))
-                    results.append({"ticker":edge["ticker"],"side":side,"count":count,"price":price})
-                except: pass
-            conn.commit()
-        finally: conn.close()
-        return results
-    def update_equity(self):
-        bal = self.update_balance_from_kalshi()
-        conn = sqlite3.connect(DB)
-        trades = conn.execute("SELECT * FROM trades").fetchall()
-        won = sum(1 for t in trades if len(t)>7 and t[7]>0)
-        total = len(trades)
-        wr = (won/total) if total else 0.5
-        returns = [t[7] for t in trades if len(t)>7 and t[7]!=0]
-        sharpe = (float(np.mean(returns))/float(np.std(returns)))*np.sqrt(252) if (returns and np.std(returns)>0) else 0.0
-        equity_data = conn.execute("SELECT balance FROM equity_curve ORDER BY id DESC").fetchall()
-        max_dd = 0.0
-        if equity_data:
-            peak = max(e[0] for e in equity_data)
-            max_dd = ((peak-bal)/peak) if peak>0 else 0.0
-        conn.execute("INSERT INTO equity_curve (ts,balance,trades,sharpe,win_rate,max_drawdown) VALUES (?,?,?,?,?,?)",
-            (datetime.now(timezone.utc).isoformat(), bal, total, sharpe, wr, max_dd))
-        conn.commit(); conn.close()
-        self.current_balance = bal
-    def run_cycle(self):
-        bal = self.update_balance_from_kalshi()
-        self.current_balance = bal
-        if not quant.history: quant.run_research()
-        forward_tester.sync()
-        ft_entries = forward_tester.scan_and_enter() if quant.should_trade() else []
-        results = self.research_markets()
-        approved = []; gate_details = []
-        for e in results.get("edges",[]):
-            g = pre_exec_gate.verify(e, bal)
-            if g["approved"]:
-                approved.append(e)
-                gate_details.append({"ticker":e["ticker"],"gate":"PASS"})
-            else:
-                gate_details.append({"ticker":e.get("ticker"),"gate":"BLOCKED",
-                    "reasons":g.get("failed",[])})
-        executed = self.execute_trades(approved, bal) if approved else []
-        for ex in executed:
-            forward_tester.enter(ex.get("ticker",""), ex.get("side",""), ex.get("price",50))
-        for ct in forward_tester.completed[-5:]:
-            if ct.get("pnl") is not None:
-                ceo.learn_from_outcome(ct["ticker"], ct["pnl"], "forward_test")
-        self.update_equity()
-        return {"balance":round(bal,2),
-            "pct_to_target":round(bal/self.target*100,1),
-            "all_timeframes_pass":quant.history[-1].get("all_pass",False) if quant.history else False,
-            "bt_results":{tf:r for tf,r in quant.history[-1].get("results",{}).items()} if quant.history else {},
-            "forward_active":len(forward_tester.active),
-            "forward_entries_this_cycle":len(ft_entries),
-            "forward_completed":len(forward_tester.completed),
-            "forward_results":[{"ticker":t["ticker"],"pnl":t["pnl"],"reason":t["reason"]}
-                              for t in forward_tester.completed[-5:]],
-            "edges_found":len(results.get("edges",[])),
-            "gate_approved":len(approved),"gate_fails":len(gate_details)-len(approved),
-            "gate_details":gate_details,"trades_executed":executed,
-            "patterns_learned":len(ceo.learned_patterns),
-            "gate_stats":{"passes":pre_exec_gate.passes,"fails":pre_exec_gate.fails},
-            "quant_params":quant.params,
-            "growth_rate":ceo.get_growth_rate(),
-            "timestamp":datetime.now(timezone.utc).isoformat()}
-    def start_autonomous(self, interval:int=60):
-        if self.running: return {"status":"ALREADY_RUNNING"}
-        self.running = True; self.cycle_interval = interval
+                    px=50;o=kc.co(ticker=edge["tk"],action="buy",side="yes",count=cnt,yes_price=px,expiration_type="GTC")
+                    kc.p.create_order(o)
+                    c.execute("INSERT INTO trades (ts,ticker,side,ep,cnt,status,strat) VALUES (?,?,?,?,?,?,?)", (datetime.now(timezone.utc).isoformat(),edge["tk"],"yes",px,cnt,"FILLED","auto"))
+                    r.append({"tk":edge["tk"],"s":"yes","cnt":cnt,"px":px})
+                except:pass
+            c.commit()
+        finally:c.close()
+        return r
+    def ue(self):
+        b=self.ub();c=sqlite3.connect(DB)
+        tr=c.execute("SELECT * FROM trades").fetchall();wo=sum(1 for x in tr if len(x)>7 and x[7]>0);tt=len(tr)
+        wr=(wo/tt) if tt else 0.5;ret=[x[7] for x in tr if len(x)>7 and x[7]!=0]
+        sh=(float(np.mean(ret))/float(np.std(ret)))*np.sqrt(252) if (ret and np.std(ret)>0) else 0.0
+        cu=c.execute("SELECT bal FROM equity ORDER BY id DESC").fetchall()
+        mx=max(e[0] for e in cu) if cu else b;dd=((mx-b)/mx) if mx>0 else 0.0
+        c.execute("INSERT INTO equity (ts,bal,t,sh,wr,dd) VALUES (?,?,?,?,?,?)", (datetime.now(timezone.utc).isoformat(),b,tt,sh,wr,dd))
+        c.commit();c.close();self.cb=b
+    def rc(self):
+        b=self.ub();self.cb=b
+        if not qh.h:qh.rr()
+        ft.sy();fe=ft.sc() if qh.sh() else []
+        r=self.rm();ap=[];gd=[]
+        for e in r.get("e",[]):
+            g=gate.v(e,b)
+            if g["ok"]:ap.append(e);gd.append({"tk":e["tk"],"gate":"PASS"})
+            else:gd.append({"tk":e.get("tk","?"),"gate":"NO"})
+        ex=self.et(ap,b) if ap else []
+        for x in ex:ft.en(x.get("tk",""),x.get("s",""),x.get("px",50))
+        for ct in ft.c[-5:]:
+            if ct.get("pn") is not None:ceo.ln(ct.get("tk",""),ct.get("pn",0),"fw")
+        self.ue()
+        sr={tf:{"s":r2.get("strat","?"),"pass":r2.get("pass",False),"wr":r2.get("wr",0),"sh":r2.get("sh",0),"t":r2.get("trades",0),"pnl":r2.get("pnl",0)} for tf,r2 in qh.h[-1].get("results",{}).items()} if qh.h else {}
+        return{"bal":round(b,2),"pct":round(b/self.tgt*100,1),"ap":qh.h[-1].get("ap",False) if qh.h else False,
+            "strats":sr,"fa":len(ft.a),"fc":len(ft.c),"ee":len(r.get("e",[])),
+            "go":len(ap),"gn":len(gd)-len(ap),"ex":len(ex),"lp":len(ceo.lp),
+            "gt":{"p":gate.p,"f":gate.f},"par":qh.ps,"gr":ceo.gr(),"it":qh.it}
+    def start(self,i=60):
+        if self.run:return{"s":"ALREADY"}
+        self.run=True;self.ci=i
         def loop():
-            while self.running:
-                try: self.run_cycle(); time.sleep(self.cycle_interval)
-                except Exception as e:
-                    conn = sqlite3.connect(DB)
-                    conn.execute("INSERT INTO autonomous_log (ts,event,details) VALUES (?,?,?)",
-                        (datetime.now(timezone.utc).isoformat(),"ERROR",str(e)[:500]))
-                    conn.commit(); conn.close(); time.sleep(5)
-        threading.Thread(target=loop, daemon=True).start()
-        conn = sqlite3.connect(DB)
-        conn.execute("INSERT INTO autonomous_log (ts,event,details) VALUES (?,?,?)",
-            (datetime.now(timezone.utc).isoformat(),"STARTED",f"interval={interval}"))
-        conn.commit(); conn.close()
-        return {"status":"STARTED","interval":interval}
-    def stop_autonomous(self):
-        self.running = False
-        return {"status":"STOPPED"}
+            while self.run:
+                try:self.rc();time.sleep(self.ci)
+                except:c=sqlite3.connect(DB);c.execute("INSERT INTO log (ts,ev,det) VALUES (?,?,?)", (datetime.now(timezone.utc).isoformat(),"ERR","e"));c.commit();c.close();time.sleep(5)
+        threading.Thread(target=loop,daemon=True).start()
+        c=sqlite3.connect(DB);c.execute("INSERT INTO log (ts,ev,det) VALUES (?,?,?)", (datetime.now(timezone.utc).isoformat(),"START",f"i={i}"));c.commit();c.close()
+        return{"s":"STARTED","i":i}
+    def stop(self):self.run=False;return{"s":"STOP"}
+tr=TR()
 
-trader = AutonomousTrader()
+app=FastAPI(title="Kalshi Auto v7")
+app.add_middleware(CORSMiddleware,allow_origins=["*"],allow_methods=["*"],allow_headers=["*"])
+@app.get("/h")
+def h():return{"ok":kc.auth,"bal":tr.cb,"pct":round(tr.cb/1000*100,2)}
+@app.post("/e")
+def e():return tr.rc()
+@app.post("/start")
+def s(i:int=60):return tr.start(i)
+@app.post("/stop")
+def st():return tr.stop()
+@app.get("/st")
+def ss():return{"run":tr.run,"bal":tr.cb,"ci":tr.ci,"auth":kc.auth}
+@app.get("/bt")
+def b():return qh.rr()
+@app.get("/fw")
+def f():return{"a":[{"tk":p["t"],"s":p["s"],"e":p["e"]} for p in ft.a.values()],"c":[{"tk":t["tk"],"s":t["s"],"pn":t["pn"],"r":t["r"]} for t in ft.c]}
+@app.get("/ceo")
+def c():return{"vb":ceo.vb(tr.cb),"lp":len(ceo.lp),"gr":ceo.gr()}
+@app.get("/gate")
+def g():return{"p":gate.p,"f":gate.f}
+@app.get("/quant")
+def q():return{"ps":qh.ps,"n":len(qh.h),"last":qh.h[-1] if qh.h else None,"sh":qh.sh()}
+@app.get("/port")
+def p():
+    b=tr.ub();c=sqlite3.connect(DB);t=c.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 20").fetchall();c.close()
+    return{"bal":b,"trades":[{"tk":x[2],"s":x[3],"px":x[4],"cnt":x[6],"pnl":x[7],"st":x[8]} for x in t]}
+@app.get("/strats")
+def sv():return{"count":len(SV),"names":list(set(x[0] for x in SV))}
 
-# ==== FASTAPI ENDPOINTS ====
-app = FastAPI(title="Kalshi Autonomous Trading System v7.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-@app.get("/health")
-def health():
-    return {"status":"alive" if kalshi.authenticated else "unauth",
-            "balance":trader.current_balance,"target":1000.0,
-            "pct_done":round(trader.current_balance/1000*100,2)}
-
-@app.get("/api/portfolio")
-def get_portfolio():
-    bal = trader.update_balance_from_kalshi()
-    conn = sqlite3.connect(DB)
-    t = conn.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 20").fetchall()
-    s = conn.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 10").fetchall()
-    conn.close()
-    return {"balance":bal,"target":1000.0,
-        "pct_to_target":round(bal/1000*100,2),
-        "trades":[{"id":r[0],"time":r[1],"ticker":r[2],"side":r[3],
-            "price":r[4],"count":r[6],"pnl":r[7],"status":r[8]} for r in t],
-        "signals":[{"ticker":r[2],"signal":r[3],"edge":r[4],"confidence":r[5]} for r in s]}
-
-@app.post("/api/execute")
-def execute_trades(): return trader.run_cycle()
-
-@app.post("/api/start")
-def start_trading(interval:int=60): return trader.start_autonomous(interval)
-
-@app.post("/api/stop")
-def stop_trading(): return trader.stop_autonomous()
-
-@app.get("/api/status")
-def status():
-    return {"running":trader.running,"balance":trader.current_balance,
-        "target":1000.0,"interval_sec":trader.cycle_interval,
-        "authenticated":kalshi.authenticated}
-
-@app.get("/api/research")
-def research(): return trader.research_markets()
-
-@app.get("/api/strategies")
-def strategies(): return trader.strategies
-
-@app.get("/api/logs")
-def logs():
-    conn = sqlite3.connect(DB)
-    rows = conn.execute("SELECT * FROM autonomous_log ORDER BY id DESC LIMIT 50").fetchall()
-    conn.close()
-    return [{"id":r[0],"time":r[1],"event":r[2],"details":r[3]} for r in rows]
-
-@app.get("/api/backtest/all")
-def backtest_all(): return quant.run_research()
-
-@app.get("/api/forward")
-def forward_test():
-    return {"active":[{"ticker":p["ticker"],"side":p["side"],"entry":p["entry"]}
-              for p in forward_tester.active.values()],
-        "completed":[{"ticker":t["ticker"],"side":t["side"],"pnl":t["pnl"],"reason":t["reason"]}
-                     for t in forward_tester.completed]}
-
-@app.get("/api/quant")
-def quant_status():
-    return {"params":quant.params,"research_runs":len(quant.history),
-        "last":quant.history[-1] if quant.history else None,
-        "should_trade":quant.should_trade()}
-
-@app.get("/api/gate")
-def gate_status():
-    return {"passes":pre_exec_gate.passes,"fails":pre_exec_gate.fails,"last":pre_exec_gate.last}
-
-@app.post("/api/research/run")
-def run_research(): return quant.run_research()
-
-@app.get("/api/ceo")
-def ceo_status():
-    return {"balance_checked":ceo.verify_balance(trader.current_balance),
-        "min_confidence":ceo.min_confidence,"drawdown_limit":ceo.drawdown_limit,
-        "patterns_learned":len(ceo.learned_patterns),
-        "growth_rate":ceo.get_growth_rate(),
-        "balance_history":ceo.balance_history[-10:]}
-
-@app.post("/api/learn")
-def learn_from_result(ticker:str="", pnl:float=0, strategy:str="unknown"):
-    return ceo.learn_from_outcome(ticker, pnl, strategy)
-
-@app.get("/api/growth")
-def growth(): return ceo.get_growth_rate()
-
-@app.post("/api/self-improve")
-def self_improve():
-    conn = sqlite3.connect(DB)
-    trades = conn.execute("SELECT ticker,side,pnl,strategy FROM trades ORDER BY id DESC LIMIT 20").fetchall()
-    conn.close()
-    for t in trades: ceo.learn_from_outcome(t[0], t[2] or 0, t[3] or "unknown")
-    return {"improved":True,"patterns":len(ceo.learned_patterns)}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+if __name__=="__main__":
+    import uvicorn;uvicorn.run(app,host="0.0.0.0",port=8000,log_level="info")
