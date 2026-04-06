@@ -112,7 +112,7 @@ class ConvergenceStrategy:
             "days": days,
             "title": mkt.get("question", mkt.get("title", "")),
             "action": "buy",
-            "order_type": "limit",
+            "type": "limit",
             "category": category,
         }
 
@@ -172,7 +172,7 @@ class ConvergenceStrategy:
         try:
             resp = self.client.place_order(
                 ticker=sig["ticker"], action="buy", side=sig["side"],
-                count=sig["contracts"], order_type="limit",
+                count=sig["contracts"], type=sig.get("type", "limit"),
                 yes_price=sig["price"] if sig["side"] == "yes" else None,
                 no_price=sig["price"] if sig["side"] == "no" else None,
             )

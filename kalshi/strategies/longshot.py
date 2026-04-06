@@ -89,7 +89,7 @@ class LongshotStrategy:
             "price": price,
             "contracts": _MAX_CONTRACTS,
             "action": "buy",
-            "order_type": "limit",
+            "type": "limit",
             "title": mkt.get("question", ""),
             "category": category,
         }
@@ -98,7 +98,7 @@ class LongshotStrategy:
         try:
             resp = self.client.place_order(
                 ticker=sig["ticker"], action="buy", side=sig["side"],
-                count=sig["contracts"], order_type="limit",
+                count=sig["contracts"], type="limit",
                 yes_price=sig["price"] if sig["side"] == "yes" else None,
                 no_price=sig["price"] if sig["side"] == "no" else None,
             )

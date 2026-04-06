@@ -88,7 +88,7 @@ class NearZeroStrategy:
                 action="buy",
                 side=signal["side"],
                 count=signal["contracts"],
-                order_type="limit",
+                type="limit",
                 yes_price=price_cents if signal["side"] == "yes" else None,
                 no_price=price_cents if signal["side"] == "no" else None,
             )
@@ -130,7 +130,7 @@ class NearZeroStrategy:
                         action="sell",
                         side=pos["side"],
                         count=pos["contracts"],
-                        order_type="market",
+                        type="market",
                     )
                     pnl = (current - entry) * pos["contracts"] * 100
                     logger.info("Closed %s (%s) pnl=%.2f", ticker, reason, pnl)

@@ -106,7 +106,10 @@ class KalshiClient:
         return self._get(f"/markets/{ticker}").get("market", {})
 
     def get_orderbook(self, ticker, depth=20):
-        return self._get(f"/orderbook/{ticker}", {"depth": str(depth)}).get("orderbook", {})
+        # Per Kalshi docs: GET /markets/{ticker}/orderbook
+        # Optional depth param
+        resp = self._get(f"/markets/{ticker}/orderbook", {"depth": str(depth)})
+        return resp.get("orderbook_fp", resp.get("orderbook", {}))
 
     def get_midpoint(self, ticker):
         resp = self._get(f"/markets/{ticker}/midpoint")
@@ -116,21 +119,37 @@ class KalshiClient:
 
     def place_order(self, ticker, action="buy", side="yes", count=1,
                     yes_price=None, no_price=None, expiration_type="GTC",
-                    order_type="limit"):
+                    type="limit", client_order_id=None):
+        """
+        Place an order on Kalshi.
+
+        Per official Kalshi API docs:
+        - Use "type" field (not "order_type")
+        - Include client_order_id for deduplication
+        - Returns 201 on success with {"order": {...}}
+        """
+        import uuid
         body = {
             "ticker": ticker,
             "action": action,
             "side": side,
             "count": count,
+            "type": type,
             "expiration_type": expiration_type,
         }
-        if order_type == "limit":
+        if type == "limit":
             if yes_price is not None:
-                body["yes_price"] = yes_price
+                body["yes_price"] = int(round(float(yes_price) * 100)) if isinstance(yes_price, float) and yes_price < 1 else yes_price
             if no_price is not None:
-                body["no_price"] = no_price
-        elif order_type == "market":
+                body["no_price"] = int(round(float(no_price) * 100)) if isinstance(no_price, float) and no_price < 1 else no_price
+        elif type == "market":
             body["action_type"] = "market"
+
+        # Deduplication ID
+        if client_order_id:
+            body["client_order_id"] = client_order_id
+        else:
+            body["client_order_id"] = str(uuid.uuid4())
 
         return self._post("/portfolio/orders", body)
 
