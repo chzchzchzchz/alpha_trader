@@ -23,7 +23,7 @@ except ImportError:
     HAS_CRYPTO = False
 
 _DEMO = "https://demo-api.kalshi.co/trade-api/v2"
-_PROD = "https://trading-api.kalshi.com/trade-api/v2"
+_PROD = "https://api.kalshi.com/trade-api/v2"
 
 # Kalshi-native: no prediction market dependency
 
@@ -77,8 +77,9 @@ class KalshiClient:
         params = {"limit": str(limit)}
         if ticker_prefix:
             params["ticker_prefix"] = ticker_prefix
-        if status:
-            params["status"] = status
+        # Skip status param — Kalshi API (demo+some prod) rejects it with 400
+        # if status:
+        #     params["status"] = status
         if cursor:
             params["cursor"] = cursor
         return self._get("/markets", params)
@@ -152,7 +153,7 @@ class KalshiClient:
         return self._get("/portfolio")
 
     def get_balance(self):
-        return self._get("/balance")
+        return self._get("/balances")
 
     # ---- History ----
 
