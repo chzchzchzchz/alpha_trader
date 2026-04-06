@@ -42,11 +42,6 @@ _KALSHI_VARS = [
     EnvSpec("KALSHI_API_KEY_FILE", required=True,  description="Path to Kalshi RSA PEM key"),
 ]
 
-_POLYMARKET_VARS = [
-    EnvSpec("POLY_API_KEY",        required=False, description="Polymarket CLOB API key"),
-    EnvSpec("POLY_API_SECRET",     required=False, description="Polymarket CLOB API secret"),
-    EnvSpec("POLY_API_PASSPHRASE", required=False, description="Polymarket CLOB passphrase"),
-]
 
 _LLM_VARS = [
     EnvSpec("OPENAI_API_KEY",      required=False, description="OpenAI API key"),
@@ -63,7 +58,7 @@ _ALPACA_VARS = [
     EnvSpec("ALPACA_SECRET", required=False, description="Alpaca secret key"),
 ]
 
-ALL_VARS = _KALSHI_VARS + _POLYMARKET_VARS + _LLM_VARS + _TELEGRAM_VARS + _ALPACA_VARS
+ALL_VARS = _KALSHI_VARS + _LLM_VARS + _TELEGRAM_VARS + _ALPACA_VARS
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +72,7 @@ def validate_environment(
     """
     Validate required environment variables at startup.
 
-    required_groups: list of "kalshi", "polymarket", "llm", "telegram", "alpaca"
+    required_groups: list of "kalshi", "llm", "telegram", "alpaca"
                      If None, only checks REQUIRED vars from all groups.
 
     Returns: dict of {group -> all_present}
@@ -85,8 +80,7 @@ def validate_environment(
     """
     group_map = {
         "kalshi":     _KALSHI_VARS,
-        "polymarket": _POLYMARKET_VARS,
-        "llm":        _LLM_VARS,
+            "llm":        _LLM_VARS,
         "telegram":   _TELEGRAM_VARS,
         "alpaca":     _ALPACA_VARS,
     }

@@ -1,51 +1,76 @@
-# Kalshi Bot Configuration
-# Copy to .env and set KALSHI_API_KEY_ID and KALSHI_API_KEY_FILE
-
 kalshi:
-  demo: true                          # set false for real money
-  key_id: "${KALSHI_API_KEY_ID}"
-  key_file: "${KALSHI_API_KEY_FILE}"  # path to RSA private key PEM
-
+  demo: true
+  key_id: ${KALSHI_API_KEY_ID}
+  key_file: ${KALSHI_API_KEY_FILE}
 capital:
-  initial_balance: 500                # USD starting balance
+  initial_balance: 500
   max_open_positions: 10
-  max_daily_loss: 50                  # stop trading if down this much in a day
-
+  max_daily_loss: 50
 strategies:
   near_zero:
     enabled: true
-    price_ceiling: 0.08               # buy YES/NO at ≤ 8¢
+    price_ceiling: 0.08
     min_volume_24h: 50
     min_days_to_close: 5
     max_days_to_close: 45
-    target_multiplier: 3.0            # sell at 3× entry
-    stop_loss_frac: 0.60
+    target_multiplier: 3.0
+    stop_loss_frac: 0.6
     max_contracts: 20
     min_smart_money_vol: 5
-
   category_specialist:
     enabled: true
-    min_trades_per_category: 10       # need this many fills before trusting stats
+    min_trades_per_category: 10
     min_win_rate: 0.55
-    blacklist_win_rate: 0.40
+    blacklist_win_rate: 0.4
     max_categories: 5
     contracts_per_trade: 5
     confidence_multiplier: 1.5
-
-  oracle_follow:
+  convergence:
     enabled: true
-    min_gap: 0.08                     # min price discrepancy to trade
-    max_position_cents: 25
-    contracts_per_trade: 10
-    hold_minutes: 5.0
-    polymarket_enabled: true
-
+    min_price_cents: 60
+    max_price_cents: 96
+    max_days_to_resolution: 14
+    min_volume_usd: 10000
+    max_spread_bps: 200
+    max_recent_spike_pct: 8
+    max_cluster_fraction: 0.25
+    base_position_pct: 0.005
+    min_filter_score: 0.6
+    max_open_positions: 10
+  late_window:
+    enabled: true
+    entry_window_seconds: 90
+    entry_threshold: 0.93
+    trade_size_usdc: 10.0
+    max_open: 3
+    trigger_mode: true
+    trigger_price: 0.7
+    trigger_minutes: 3.0
+    exit_price: 0.9
+  longshot:
+    enabled: true
+    min_price_cents: 1
+    max_price_cents: 5
+    min_volume_usd: 500
+    min_days_to_resolution: 1
+    max_days_to_resolution: 30
+    max_positions: 50
+    usdc_per_position: 1.0
+    target_price: 0.5
+  flash_crash:
+    enabled: true
+    poll_interval_seconds: 3
+    drop_threshold: 0.3
+    window_seconds: 10
+    take_profit: 0.1
+    stop_loss: 0.05
+    size_usdc: 5.0
+    max_open: 5
 schedule:
-  polling_interval: 60               # seconds between market scans
-  category_refresh_interval: 3600   # seconds between performance profile refresh
-
+  polling_interval: 60
+  category_refresh_interval: 3600
 logging:
-  level: "INFO"
-  file: "logs/kalshi.log"
+  level: INFO
+  file: logs/kalshi.log
   max_file_size: 10485760
   backup_count: 5

@@ -36,7 +36,10 @@ from kalshi.executor import KalshiExecutor
 from kalshi.wallet_analyzer import WalletAnalyzer
 from kalshi.strategies.near_zero import NearZeroStrategy, NearZeroConfig
 from kalshi.strategies.category_specialist import CategorySpecialistStrategy, CategorySpecialistConfig
-from kalshi.strategies.oracle_follow import OracleFollowStrategy, OracleFollowConfig
+from kalshi.strategies.convergence import ConvergenceStrategy, ConvergenceConfig
+from kalshi.strategies.late_window import LateWindowStrategy, LateWindowConfig
+from kalshi.strategies.flash_crash import FlashCrashStrategy
+from kalshi.strategies.longshot import LongshotStrategy, LongshotConfig
 
 
 def load_config(path: str = "kalshi_config.yaml") -> dict:
@@ -108,16 +111,32 @@ def build_strategies(cfg: dict, client: KalshiClient, analyzer: WalletAnalyzer) 
             ),
         ))
 
-    if strat_cfg.get("oracle_follow", {}).get("enabled", True):
-        of = strat_cfg["oracle_follow"]
-        strategies.append(OracleFollowStrategy(
+    if strat_cfg.get("convergence", {}).get("enabled", True):
+        cv = strat_cfg["convergence"]
+        strategies.append(ConvergenceStrategy(
             client, analyzer,
-            OracleFollowConfig(
-                min_gap=of.get("min_gap", 0.08),
-                max_position_cents=of.get("max_position_cents", 25),
-                contracts_per_trade=of.get("contracts_per_trade", 10),
-                hold_minutes=of.get("hold_minutes", 5.0),
-                polymarket_enabled=of.get("polymarket_enabled", True),
+            capital=cap_cfg.get("initial_balance", 500),
+            config=ConvergenceConfig(
+                min_price=int(cv.get("min_price", 60)),
+                max_price=int(cv.get("max_price", 96)),
+                max_days_to_close=cv.get("max_days_to_close", 14.0),
+                min_volume=cv.get("min_volume", 500),
+                max_spread=cv.get("max_spread", 5),
+                max_cluster_fraction=cv.get("max_cluster_fraction", 0.25),
+                base_position_pct=cv.get("base_position_pct", 0.005),
+                max_contracts=cv.get("max_contracts", 10),
+            ),
+        ))
+
+    if strat_cfg.get("late_window", {}).get("enabled", True):
+        lw = strat_cfg["late_window"]
+        strategies.append(LateWindowStrategy(
+            client, analyzer,
+            config=LateWindowConfig(
+                snipe_window_seconds=lw.get("snipe_window_seconds", 90.0),
+                snipe_threshold=lw.get("snipe_threshold", 93),
+                max_open=lw.get("max_open", 3),
+                trade_size_usdc=lw.get("trade_size_usdc", 10.0),
             ),
         ))
 
@@ -142,6 +161,40 @@ def run_scan_mode(client: KalshiClient, analyzer: WalletAnalyzer, cfg: dict) -> 
     for o in opps[:10]:
         print(f"  {o.ticker:40s}  {o.buy_side.upper()} @ {o.yes_price:.3f}  "
               f"score={o.score:.4f}  days={o.days_to_close:.1f}  smart_vol={o.smart_money_volume}")
+
+    # Convergence (7-filter)
+    cv_cfg = cfg.get("strategies", {}).get("convergence", {})
+    if cv_cfg.get("enabled", True):
+        cv = ConvergenceStrategy(client, analyzer,
+            capital=cfg.get("capital", {}).get("initial_balance", 500),
+            config=ConvergenceConfig(
+                min_price=int(cv_cfg.get("min_price", 60)),
+                max_price=int(cv_cfg.get("max_price", 96)),
+                max_days_to_close=cv_cfg.get("max_days_to_close", 14.0),
+                min_volume=cv_cfg.get("min_volume", 500),
+                max_spread=cv_cfg.get("max_spread", 5),
+            ),
+        )
+        cv_signals = cv.run_scan()
+        print(f"\n--- Convergence Signals ({len(cv_signals)}) ---")
+        for s in cv_signals[:10]:
+            print(f"  {s['ticker']:40s}  {s['side'].upper()} @ {s['price_cents']}c  "
+                  f"score={s['score']:.2f}  contracts={s['contracts']}")
+
+    # Late-window
+    lw_cfg = cfg.get("strategies", {}).get("late_window", {})
+    if lw_cfg.get("enabled", True):
+        lw = LateWindowStrategy(client, analyzer,
+            config=LateWindowConfig(
+                snipe_window_seconds=lw_cfg.get("snipe_window_seconds", 90.0),
+                snipe_threshold=lw_cfg.get("snipe_threshold", 93),
+            ),
+        )
+        lw_signals = lw.run_scan()
+        print(f"\n--- Late-Window Signals ({len(lw_signals)}) ---")
+        for s in lw_signals[:10]:
+            print(f"  {s['ticker']:40s}  {s['side'].upper()} @ {s['price_cents']}c  "
+                  f"mode={s['mode']}  closes_in={s.get('seconds_to_close',0):.0f}s")
 
     # Category stats
     print("\n--- Category Stats ---")

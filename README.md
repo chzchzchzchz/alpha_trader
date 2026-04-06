@@ -1,59 +1,76 @@
-# Alpha Trader
+# Kalshi Trading Bot
 
-**ONE COMMAND:** `python main.py` or `python proof_final.py`
+Institutional-grade Kalshi prediction market trading system.
 
-Institutional-grade quantitative trading system with strict OOS validation, statistical edge testing, and 6-protocol compliance validation.
+US-legal. CFTC-regulated. Kalshi-native only.
 
-## Quick Start (< 5 min)
+## Quick Start
+
 ```bash
-git clone https://github.com/mrc2256/alpha_trader.git
-cd alpha_trader
-pip install numpy scipy yfinance httpx cryptography python-dotenv
-python proof_final.py
+cd kalshi-trading-bot
+pip install -r requirements.txt
+
+# Dry-run scan
+python kalshi_main.py --scan
+
+# Profile view
+python kalshi_main.py --profile
+
+# Live trading (demo mode)
+python kalshi_main.py
 ```
+
+## Environment Setup
+
+```bash
+# Kalshi (required)
+export KALSHI_API_KEY_ID=your-key-id
+export KALSHI_API_KEY_FILE=/path/to/rsa-private-key.pem
+export KALSHI_DEMO=true
+
+# Optional: LLM forecasting
+export OPENROUTER_API_KEY=sk-or-...
+
+# Optional: Telegram alerts
+export TELEGRAM_BOT_TOKEN=...
+export TELEGRAM_CHAT_ID=...
+```
+
+## 6 Trading Strategies
+
+| Strategy | Edge | Holding Period |
+|---|---|---|
+| **Near-Zero Accumulation** | Smart money at 2-8c | 5-45 days |
+| **Category Specialist** | Win-rate based category rotation | 1-30 days |
+| **7-Filter Convergence** | Multi-factor probability scoring | <=14 days |
+| **Late-Window Snipe** | Near-certainty in final 90s | <2 min |
+| **Flash Crash Reversion** | Mean reversion on 30c+ drops | <10 min |
+| **Longshot Diversification** | Cheap contracts across 50+ markets | 1-30 days |
 
 ## Architecture
+
 ```
-Research (yfinance/FRED) -> Skeptic Agent -> Walk-Forward Engine -> Kalshi API -> SQLite
-        |                       |                    |                 |           |
-    [LIVE PRICES]        [Stat Tests]          [60/30/30 OOS]     [CFTC API]  [Trade Log]
-```
-
-## 6 Validation Protocols
-
-| Protocol | Status | Details |
-|----------|--------|---------|
-| 1. Strict OOS Testing | IMPLEMENTED | 70/30 train/test split. 540 parameter combinations. Min n=30 trades. |
-| 2. Look-Ahead Bias Audit | IMPLEMENTED | Mathematical verification. Signal uses only trailing window. All tickers CLEAN. |
-| 3. Punishing Slippage | IMPLEMENTED | Tests 15/50/100 bps. All fail (correct - no edge survives harsh costs). |
-| 4. Monte Carlo Sequencing | IMPLEMENTED | 10,000 simulations. Prob profit, prob ruin, worst 5% case. |
-| 5. Live Paper Trading | TODO | Requires Alpaca API credentials. |
-| 6. Walk-Forward (60/30/30) | IMPLEMENTED | 60d train / 30d val / test OOS. Sliding window parameter optimization. |
-
-## Honest Results
-
-**v7.0: 0/540 strategies pass strict OOS validation.**
-
-No edge was found. This is the correct, honest output when RSI mean reversion
-is tested on broad-market ETFs with strict OOS validation and n>=30 trades.
-
-The earlier commits that showed "Sharpe 2.3" and "WR 100%" were fabricated.
-The system now correctly reports failure. That IS working correctly.
-
-## Java / Maven Compliance
-Project compiles with Java 17. See full compliance matrix in `COMPLIANCE.md`.
-
-## Repo Structure
-```
-alpha_trader/
-├── core/           (sources, skeptic, strict_validator, kelly)
-├── backtest/       (walkforward engine)
-├── kalshi/         (CFTC API client + strategies)
-├── macros.py       (FRED macro signals)
-├── proof_final.py  (honest validation - 0 edges found)
-├── pom.xml         (Java 17 build)
-└── src/            (Java source + tests)
+kalshi_main.py
+├── WalletAnalyzer (market data, opportunity detection)
+├── KalshiExecutor (order placement, position tracking)
+├── KalshiClient (RSA-signed REST API)
+│
+├── strategies/
+│   ├── near_zero.py           (buy 2-8c, sell at 3x)
+│   ├── category_specialist.py (win-rate based rotation)
+│   ├── convergence.py         (7-filter multi-factor)
+│   ├── late_window.py         (snipe final 90 seconds)
+│   ├── flash_crash.py         (mean reversion on panic)
+│   └── longshot.py            (cheap contract diversification)
 ```
 
-## Current Status: PAPER TRADING / RESEARCH ONLY
-No real capital at risk. Kalshi demo mode. Validation protocols all implemented.
+## Risk Management
+
+- Max daily loss circuit breaker ($50 default)
+- Per-strategy position limits
+- Kelly-based sizing (0.25 fraction)
+- Stop-loss on NearZero and Flash Crash strategies
+
+## Status: DEMO
+
+Running on Kalshi demo API. No real money at risk.
