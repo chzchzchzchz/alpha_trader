@@ -49,30 +49,34 @@ class State:
 
     def _load(self):
         try:
-            # Cancel all old resting orders from DB (from previous runs)
+            # Cancel ALL old resting orders from DB (from previous runs)
             self.conn.execute(
                 "UPDATE trades SET status='cancelled_restart' "
-                "WHERE status='resting' AND ts < ?",
-                (int(time.time()) - 300,))
+                "WHERE status='resting'")
             self.conn.commit()
 
+            # Load ALL executed fills (never drop — cooldown depends on this)
             rows = self.conn.execute(
                 "SELECT ticker,side,price_cents,ts FROM trades "
                 "WHERE status='executed' ORDER BY ts DESC").fetchall()
-            for t, s, p, ts in rows[:50]:
+            for t, s, p, ts in rows:
                 if t not in self.filled:
                     self.filled[t] = [(ts, s, p)]
 
+            # Track tickers that failed to fill (to avoid repeat spam)
             rows = self.conn.execute(
-                "SELECT ticker,side,price_cents,ts,order_id "
-                "FROM trades WHERE status='resting' ORDER BY ts DESC").fetchall()
-            for t, s, p, ts, oid in rows[:10]:
-                if t not in self.pending:
-                    self.pending[t] = dict(order_id=oid, ts=ts, cents=p,
-                                           side=s, stale_cycles=0)
-            log.info(f"  State: {len(self.filled)} filled, {len(self.pending)} pending")
+                "SELECT ticker, MAX(ts), status FROM trades GROUP BY ticker HAVING status='resting'").fetchall()
+            self.no_fill_until = {}  # ticker -> ts when we can retry
+            for t, last_ts, st in rows:
+                self.no_fill_until[t] = last_ts + 1800  # Don't retry for 30 min
+
+            # No pending orders survive restart
+            self.pending = {}
+            log.info(f"  State: {len(self.filled)} filled tickers, {len(self.pending)} pending, "
+                     f"{len(self.no_fill_until)} no-fill cooldowns")
         except Exception as e:
             log.warning(f"  State load failed: {e}")
+            self.no_fill_until = {}
 
     def last_fill_ts(self, ticker: str) -> float:
         return self.filled.get(ticker, [(0,)])[0][0]
@@ -345,8 +349,39 @@ class Trader:
 
             ticker = sig["ticker"]
             side = "yes" if sig["rec"] == "buy_yes" else "no"
-            pc = sig["ask_cents"] if side == "yes" else max(1, int(sig["swarm_yes"] * 100))
-            pc = max(1, min(pc, 15))
+            bid_c = sig.get("bid_cents", 1)
+            ask_c = sig.get("ask_cents", 99)
+
+            # ── FIX: Price logic for YES vs NO ──
+            # YES buy: pay yes_ask_cents (1-99c range)
+            # NO buy: pay (100 - yes_bid_cents) = the NO ask price
+
+            # BLOCK already-resolved markets (100c or 0c = outcome known)
+            if ask_c >= 98 or bid_c <= 2:
+                skipped["profit"] += 1
+                log.debug(f"    SKIP {ticker}: already resolved (bid={bid_c}c ask={ask_c}c)")
+                continue
+
+            if side == "yes":
+                order_price = min(ask_c, 15)  # Cap at 15c max
+                order_price = max(1, order_price)
+            else:
+                # NO ask = 100 - yes_bid. If yes_bid=11c, NO ask=89c
+                # We only want YES-side cheap markets (<=15c yes_ask)
+                # For NO, we buy when NO is cheap = when YES is expensive (>=85c)
+                no_ask = 100 - bid_c  # NO ask price in cents
+                no_bid = 100 - ask_c  # NO bid price in cents
+                if no_ask > 85:
+                    # NO is expensive, skip (this is a YES-lean market)
+                    skipped["profit"] += 1
+                    log.debug(f"    SKIP {ticker}: NO too expensive ({no_ask}c)")
+                    continue
+                order_price = no_ask  # Pay market price for NO
+                if order_price < 30:
+                    order_price = max(1, min(no_bid + 1, no_ask))  # Slightly above bid, at or below ask
+                else:
+                    order_price = max(1, min(no_ask, 30))
+
             swarm_yes = sig["swarm_yes"]
 
             # Rule 1: Cooldown
@@ -374,10 +409,10 @@ class Trader:
                 skipped["coherence"] += 1
                 continue
 
-            # Rule 5: Min net profit (double-check)
-            expected = self.state.net_profit(side, pc, swarm_yes)
+            # Rule 5: Min net profit (double-check with CORRECT price)
+            expected = self.state.net_profit(side, order_price, swarm_yes)
             if expected < MIN_NET_PROFIT:
-                log.debug(f"    SKIP {ticker}: expected profit {expected:.1f}c < {MIN_NET_PROFIT}c threshold")
+                log.debug(f"    SKIP {ticker}: expected profit {expected:.1f}c < {MIN_NET_PROFIT}c at {order_price}c")
                 skipped["profit"] += 1
                 continue
 
@@ -388,7 +423,7 @@ class Trader:
 
             bt = sig.get("bt_stats", {})
             bt_info = f"WR={bt.get('bt_win_rate',0):.1%} PnL={bt.get('bt_total_pnl',0):+.1f}c" if bt else "no BT data"
-            log.info(f"  ▶ TRADE: {ticker} {side} x1 @{pc}c [BT: {bt_info}] edge={sig['edge']:+.1%}")
+            log.info(f"  ▶ TRADE: {ticker} {side} x1 @{order_price}c [BT: {bt_info}] edge={sig['edge']:+.1%}")
             try:
                 result = self.client.place_order(
                     ticker=ticker, action="buy", side=side, count=1,
