@@ -66,6 +66,34 @@ strategies:
     stop_loss: 0.05
     size_usdc: 5.0
     max_open: 5
+  panic_sniper:
+    enabled: true
+    drop_threshold: 0.20
+    recent_window: 300
+    min_price_before_drop: 30
+    max_recovery_window: 1800
+    size_usdc: 5.0
+    max_open: 8
+  time_sniper:
+    enabled: true
+    min_spread_cents: 12
+    min_volume: 20
+    max_open: 5
+    size_usdc: 5.0
+  overreaction_reversal:
+    enabled: true
+    move_threshold: 0.25
+    baseline_window: 1800
+    entry_delay: 120
+    size_usdc: 10.0
+    max_open: 3
+  smart_money:
+    enabled: true
+    whale_threshold_contracts: 50
+    whale_threshold_usdc: 100
+    min_trades_to_confirm: 2
+    max_open: 6
+    size_usdc: 3.0
 schedule:
   polling_interval: 60
   category_refresh_interval: 3600

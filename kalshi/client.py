@@ -1,9 +1,8 @@
 """
-Kalshi REST API client v3 — Updated for new auth standard (PSS padding).
+Kalshi REST API client v4 — Fixed auth per kalshi-python SDK source.
 
-Authentication: RSA-PSS-signed requests per Kalshi docs.
+Authentication: RSA-PSS. Message = timestamp + method + path (NO body).
 Headers: KALSHI-ACCESS-KEY, KALSHI-ACCESS-SIGNATURE, KALSHI-ACCESS-TIMESTAMP
-Signing: Strip query params from path before signing. Use PSS padding.
 API:  demo-api.kalshi.co (demo) / api.elections.kalshi.com (production)
 """
 from __future__ import annotations
@@ -12,9 +11,8 @@ import os
 import json
 import time
 import base64
-import hashlib
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse, urlencode
+from urllib.parse import urlencode
 from typing import Any
 
 try:
@@ -43,14 +41,14 @@ class KalshiClient:
                 Path(pem).read_bytes(), password=None
             )
 
-    def _sign(self, method, path, body=""):
-        # Strip query params from path before signing (per Kalshi docs)
-        path_without_query = path.split("?")[0]
+    def _sign(self, method: str, path: str):
+        """Sign request per Kalshi SDK: timestamp + method + /trade-api/v2 + path (no body)."""
         ts = str(int(time.time() * 1000))
-        msg = ts + method.upper() + path_without_query + body
+        # SDK uses full path including /trade-api/v2 prefix
+        full_path = "/trade-api/v2" + path
+        msg = ts + method.upper() + full_path
         if self._pk is None:
             return {}
-        # Use PSS padding (not PKCS1v15) per Kalshi docs
         sig = self._pk.sign(
             msg.encode(),
             padding.PSS(
@@ -65,28 +63,27 @@ class KalshiClient:
             "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
         }
 
-    def _get(self, path, params=None):
+    def _get(self, path: str, params: dict | None = None) -> dict:
         query = ""
         if params:
             query = "?" + urlencode(params)
-        full_path = path + query
-        headers = self._sign("GET", full_path)
-        r = self._session.get(
-            self.base_url + full_path, headers=headers, timeout=15
-        )
+        full = path + query
+        # Sign with path ONLY (no query params) per Kalshi docs
+        headers = self._sign("GET", path)
+        r = self._session.get(self.base_url + full, headers=headers, timeout=15)
         r.raise_for_status()
         return r.json()
 
-    def _post(self, path, body):
+    def _post(self, path: str, body: dict) -> dict:
         bs = json.dumps(body)
-        headers = self._sign("POST", path, bs)
+        headers = self._sign("POST", path)
         r = self._session.post(
             self.base_url + path, headers=headers, data=bs, timeout=15
         )
         r.raise_for_status()
         return r.json()
 
-    def _delete(self, path):
+    def _delete(self, path: str) -> dict:
         headers = self._sign("DELETE", path)
         r = self._session.delete(self.base_url + path, headers=headers, timeout=15)
         r.raise_for_status()
@@ -94,78 +91,80 @@ class KalshiClient:
 
     # ---- Market Data ----
 
-    def get_markets(self, ticker_prefix=None, limit=200, cursor=None):
-        params = {"limit": str(limit)}
+    def get_markets(self, ticker_prefix=None, series_ticker=None, limit=200, status=None, cursor=None):
+        params: dict[str, str] = {"limit": str(limit)}
         if ticker_prefix:
             params["ticker_prefix"] = ticker_prefix
+        if series_ticker:
+            params["series_ticker"] = series_ticker
+        if status:
+            params["status"] = status
         if cursor:
             params["cursor"] = cursor
         return self._get("/markets", params)
 
-    def get_market(self, ticker):
+    def get_market(self, ticker: str):
         return self._get(f"/markets/{ticker}").get("market", {})
 
-    def get_orderbook(self, ticker, depth=20):
-        # Per Kalshi docs: GET /markets/{ticker}/orderbook
-        # Optional depth param
+    def get_orderbook(self, ticker: str, depth=20):
         resp = self._get(f"/markets/{ticker}/orderbook", {"depth": str(depth)})
         return resp.get("orderbook_fp", resp.get("orderbook", {}))
 
-    def get_midpoint(self, ticker):
+    def get_midpoint(self, ticker: str):
         resp = self._get(f"/markets/{ticker}/midpoint")
         return resp.get("yes_price") or resp.get("midpoint")
 
     # ---- Trading ----
 
     def place_order(self, ticker, action="buy", side="yes", count=1,
-                    yes_price=None, no_price=None, expiration_type="GTC",
-                    type="limit", client_order_id=None):
-        """
-        Place an order on Kalshi.
-
-        Per official Kalshi API docs:
-        - Use "type" field (not "order_type")
-        - Include client_order_id for deduplication
-        - Returns 201 on success with {"order": {...}}
-        """
+                    yes_price=None, no_price=None, expiration_type="gtc",
+                    type="limit", client_order_id=None, post_only=False,
+                    reduce_only=False, cancel_on_pause=False):
         import uuid
-        body = {
+        body: dict[str, Any] = {
             "ticker": ticker,
-            "action": action,
             "side": side,
-            "count": count,
-            "type": type,
+            "action": action,
             "expiration_type": expiration_type,
         }
         if type == "limit":
+            body["type"] = "limit"
             if yes_price is not None:
-                body["yes_price"] = int(round(float(yes_price) * 100)) if isinstance(yes_price, float) and yes_price < 1 else yes_price
+                body["yes_price"] = int(round(float(yes_price) * 100)) if float(yes_price) < 1 else int(yes_price)
             if no_price is not None:
-                body["no_price"] = int(round(float(no_price) * 100)) if isinstance(no_price, float) and no_price < 1 else no_price
+                body["no_price"] = int(round(float(no_price) * 100)) if float(no_price) < 1 else int(no_price)
         elif type == "market":
             body["action_type"] = "market"
-
-        # Deduplication ID
-        if client_order_id:
-            body["client_order_id"] = client_order_id
-        else:
-            body["client_order_id"] = str(uuid.uuid4())
-
+        
+        # Count: int
+        body["count"] = int(count)
+        
+        # Flags
+        if post_only:
+            body["post_only"] = True
+        if reduce_only:
+            body["reduce_only"] = True
+        if cancel_on_pause:
+            body["cancel_order_on_pause"] = True
+        
+        body["client_order_id"] = client_order_id or str(uuid.uuid4())
         return self._post("/portfolio/orders", body)
 
-    def cancel_order(self, order_id):
-        return self._delete(f"/orders/{order_id}")
+    def cancel_order(self, order_id: str):
+        return self._delete(f"/portfolio/orders/{order_id}")
 
-    def get_orders(self, ticker=None, limit=20):
-        params = {"limit": str(limit)}
+    def get_orders(self, status=None, ticker=None, limit=20):
+        params: dict[str, str] = {"limit": str(limit)}
+        if status:
+            params["status"] = status
         if ticker:
             params["ticker"] = ticker
-        return self._get("/orders", params)
+        return self._get("/portfolio/orders", params)
 
     # ---- Portfolio ----
 
-    def get_positions(self, settlement_status="open"):
-        return self._get("/positions", {"settlement_status": settlement_status})
+    def get_positions(self, settlement_status="unsettled"):
+        return self._get("/portfolio/positions", {"settlement_status": settlement_status})
 
     def get_portfolio(self):
         return self._get("/portfolio")
@@ -176,7 +175,17 @@ class KalshiClient:
     # ---- History ----
 
     def get_fills(self, limit=100):
-        return self._get("/fills", {"limit": str(limit)})
+        return self._get("/portfolio/fills", {"limit": str(limit)})
 
     def get_settlements(self, limit=100):
-        return self._get("/settlements", {"limit": str(limit)})
+        return self._get("/portfolio/settlements", {"limit": str(limit)})
+    
+    # ---- Trades (public) ----
+    
+    def get_trades(self, ticker=None, limit=100, cursor=None):
+        params: dict[str, str] = {"limit": str(limit)}
+        if ticker:
+            params["ticker"] = ticker
+        if cursor:
+            params["cursor"] = cursor
+        return self._get("/markets/trades", params)
