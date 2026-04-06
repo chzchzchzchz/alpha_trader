@@ -1,0 +1,43 @@
+:root{--bg:#0a0b0f;--card:#12141f;--border:#1e2130;--text:#e4e4e7;--dim:#71717a;
+--green:#22c55e;--red:#ef4444;--blue:#3b82f6;--accent:#8b5cf6;--hover:#1a1d2e}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Mono",monospace,sans-serif}
+#app{min-height:100vh;display:flex;flex-direction:column}
+
+.top-bar{display:flex;justify-content:space-between;align-items:center;padding:14px 24px;
+  background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:10}
+.logo{display:flex;align-items:center;gap:10px;font-size:20px;font-weight:700}
+.logo-icon{color:var(--accent);font-size:26px}
+.status{display:flex;align-items:center;gap:8px;font-size:13px}
+.dot{width:8px;height:8px;border-radius:50%;background:#333}
+.dot.live{background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+
+main{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px;flex:1}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto}
+.card.full{grid-column:1/-1}
+.card h2{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:12px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+.stats>div{display:flex;flex-direction:column}
+.stats label{font-size:10px;color:var(--dim);text-transform:uppercase}
+.stats>div>div{font-size:18px;font-weight:700;margin-top:4px}
+
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;padding:6px 10px;color:var(--dim);border-bottom:1px solid var(--border);font-weight:500}
+td{padding:8px 10px;border-bottom:1px solid var(--border)}
+tr:hover td{background:var(--hover)}
+
+.pos{color:var(--green)}.neg{color:var(--red)}.pass{color:var(--green);font-weight:700}.fail{color:var(--red);font-weight:700}
+
+button{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:8px 18px;
+  cursor:pointer;font-size:13px;font-weight:600;transition:all .15s}
+button:hover{opacity:.85;transform:translateY(-1px)}
+button:disabled{opacity:.4;cursor:default;transform:none}
+button.trade-btn{background:var(--green);padding:4px 10px;font-size:11px}
+
+footer{display:flex;justify-content:space-between;padding:10px 24px;background:var(--card);
+  border-top:1px solid var(--border);color:var(--dim);font-size:11px}
+#mkt-info{font-size:13px;color:var(--dim);margin-bottom:10px}
+#bt-status{font-size:13px;margin-top:8px;color:var(--dim)}
+
+@media(max-width:900px){main{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}}

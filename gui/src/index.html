@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Alpha Trader - Desktop</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="top-bar">
+      <div class="logo"><span class="logo-icon">\u03b1</span><span>Alpha Trader</span></div>
+      <div class="status"><span class="dot" id="dot"></span><span id="stxt">Connecting...</span></div>
+    </header>
+    <main>
+      <section class="card">
+        <h2>Portfolio</h2>
+        <div class="stats">
+          <div><label>Equity</label><div id="eq">$500.00</div></div>
+          <div><label>P&L Today</label><div id="pnl">$0.00</div></div>
+          <div><label>Trades</label><div id="trc">0</div></div>
+          <div><label>Win Rate</label><div id="wr">55.0%</div></div>
+        </div>
+      </section>
+      <section class="card">
+        <h2>Live Prices</h2>
+        <table><thead><tr><th>Ticker</th><th>Price</th><th>Change</th><th>Sentiment</th></tr></thead>
+        <tbody id="px-body"></tbody></table>
+      </section>
+      <section class="card">
+        <h2>Kalshi Markets</h2>
+        <div id="mkt-info">Scanning...</div>
+        <table><thead><tr><th>Ticker</th><th>YES</th><th>NO</th><th>Edge</th></tr></thead>
+        <tbody id="mkt-body"></tbody></table>
+      </section>
+      <section class="card">
+        <h2>Strategy Backtest</h2>
+        <div class="stats">
+          <div><label>Best Symbol</label><div id="bt-sym">-</div></div>
+          <div><label>Win Rate</label><div id="bt-wr">-</div></div>
+          <div><label>Sharpe</label><div id="bt-sh">-</div></div>
+          <div><label>Verdict</label><div id="bt-v">-</div></div>
+        </div>
+        <button onclick="runBT()">Run Backtest</button>
+        <div id="bt-status"></div>
+      </section>
+      <section class="card full">
+        <h2>Trade Log</h2>
+        <table><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Result</th><th></th></tr></thead>
+        <tbody id="tl-body"></tbody></table>
+      </section>
+    </main>
+    <footer><span>Alpha Trader v1.0.0</span><span id="clock"></span></footer>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

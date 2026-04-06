@@ -1,0 +1,24 @@
+{
+  "name": "alpha-trader",
+  "version": "1.0.0",
+  "description": "Alpha Trader Desktop",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "concurrently -k \"python3 -m uvicorn api.main:app --port 8765\" \"wait-on http://127.0.0.1:8765 && electron .\"",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "com.alphatrader.desktop",
+    "productName": "Alpha Trader",
+    "mac": { "category": "public.app-category.finance" },
+    "files": ["electron/**/*", "src/**/*", "api/**/*", "package.json"],
+    "extraResources": [{ "from": "api", "to": "api" }, { "from": "src", "to": "src" }]
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "electron": "^28.1.0",
+    "electron-builder": "^24.9.1",
+    "wait-on": "^7.2.0"
+  }
+}
