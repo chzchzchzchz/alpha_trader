@@ -73,7 +73,7 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""CREATE TABLE IF NOT EXISTS research_proposals (
         ts INTEGER, ticker TEXT, side TEXT, strategy TEXT,
-        yes_bid REAL, yes_ask REAL, vol_24h REAL,
+        bid_cents INT, ask_cents INT, vol REAL,
         bt_markets INT, bt_wr REAL, bt_pnl REAL, bt_sharpe REAL,
         expected_pnl REAL, proposal_score REAL,
         verdict TEXT, details TEXT
