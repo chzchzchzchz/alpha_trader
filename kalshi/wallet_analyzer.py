@@ -86,7 +86,7 @@ class WalletAnalyzer:
     def __init__(self, client):
         self.client = client
 
-    def fetch_all_markets(self, status: str = "active") -> list[MarketStats]:
+    def fetch_all_markets(self, status: str | None = None) -> list[MarketStats]:
         """Page through open markets. Returns normalized MarketStats."""
         markets: list[MarketStats] = []
         cursor = None
