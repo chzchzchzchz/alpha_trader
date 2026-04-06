@@ -68,7 +68,11 @@ def api_portfolio():
 def api_markets():
     try:
         from kalshi.client import KalshiClient
-        c = KalshiClient(key_id="REDACTED_KALSHI_KEY_ID", private_key_path=None, demo=True)
+        c = KalshiClient(
+            key_id=os.environ.get("KALSHI_API_KEY_ID"),
+            private_key_path=os.environ.get("KALSHI_API_KEY_FILE"),
+            demo=os.environ.get("KALSHI_DEMO", "true").lower() == "true"
+        )
         mkts = c.get_markets(limit=50)
         m15 = [m for m in mkts if '15M' in m.get('ticker','')]
         result = [{"ticker": m.get("ticker",""), "yes_bid": m.get("yes_bid",0),

@@ -1,5 +1,20 @@
 # Environment variables
 .env
+.env.*
+!.env.sample
+
+# Private keys & certificates
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+service-account*.json
+
+# Virtual environments
+venv/
+.venv/
+env/
 
 # Cache directory
 cache/

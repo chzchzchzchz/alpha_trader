@@ -1,8 +1,10 @@
 """
-Kalshi REST API client v2 - Kalshi-native (no prediction market).
+Kalshi REST API client v3 — Updated for new auth standard (PSS padding).
 
-Authentication: RSA-signed requests (Kalshi CFTC-regulated platform).
-API: demo-api.kalshi.co (demo) / trading-api.kalshi.com (production)
+Authentication: RSA-PSS-signed requests per Kalshi docs.
+Headers: KALSHI-ACCESS-KEY, KALSHI-ACCESS-SIGNATURE, KALSHI-ACCESS-TIMESTAMP
+Signing: Strip query params from path before signing. Use PSS padding.
+API:  demo-api.kalshi.co (demo) / api.elections.kalshi.com (production)
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import time
 import base64
 import hashlib
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse, urlencode
 from typing import Any
 
 try:
@@ -23,12 +26,10 @@ except ImportError:
     HAS_CRYPTO = False
 
 _DEMO = "https://demo-api.kalshi.co/trade-api/v2"
-_PROD = "https://api.kalshi.com/trade-api/v2"
-
-# Kalshi-native: no prediction market dependency
+_PROD = "https://api.elections.kalshi.com/trade-api/v2"
 
 class KalshiClient:
-    """Kalshi REST API client with CFTC-regulated trading."""
+    """Kalshi REST API client with RSA-PSS authentication."""
 
     def __init__(self, key_id=None, private_key_path=None, demo=True):
         self.key_id = key_id or os.environ.get("KALSHI_API_KEY_ID", "")
@@ -43,11 +44,21 @@ class KalshiClient:
             )
 
     def _sign(self, method, path, body=""):
+        # Strip query params from path before signing (per Kalshi docs)
+        path_without_query = path.split("?")[0]
         ts = str(int(time.time() * 1000))
-        msg = ts + method.upper() + path + body
+        msg = ts + method.upper() + path_without_query + body
         if self._pk is None:
             return {}
-        sig = self._pk.sign(msg.encode(), padding.PKCS1v15(), hashes.SHA256())
+        # Use PSS padding (not PKCS1v15) per Kalshi docs
+        sig = self._pk.sign(
+            msg.encode(),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
         return {
             "KALSHI-ACCESS-KEY": self.key_id,
             "KALSHI-ACCESS-TIMESTAMP": ts,
@@ -55,9 +66,13 @@ class KalshiClient:
         }
 
     def _get(self, path, params=None):
-        headers = self._sign("GET", path)
+        query = ""
+        if params:
+            query = "?" + urlencode(params)
+        full_path = path + query
+        headers = self._sign("GET", full_path)
         r = self._session.get(
-            self.base_url + path, headers=headers, params=params, timeout=10
+            self.base_url + full_path, headers=headers, timeout=15
         )
         r.raise_for_status()
         return r.json()
@@ -66,20 +81,23 @@ class KalshiClient:
         bs = json.dumps(body)
         headers = self._sign("POST", path, bs)
         r = self._session.post(
-            self.base_url + path, headers=headers, data=bs, timeout=10
+            self.base_url + path, headers=headers, data=bs, timeout=15
         )
+        r.raise_for_status()
+        return r.json()
+
+    def _delete(self, path):
+        headers = self._sign("DELETE", path)
+        r = self._session.delete(self.base_url + path, headers=headers, timeout=15)
         r.raise_for_status()
         return r.json()
 
     # ---- Market Data ----
 
-    def get_markets(self, ticker_prefix=None, limit=200, status=None, cursor=None):
+    def get_markets(self, ticker_prefix=None, limit=200, cursor=None):
         params = {"limit": str(limit)}
         if ticker_prefix:
             params["ticker_prefix"] = ticker_prefix
-        # Skip status param — Kalshi API (demo+some prod) rejects it with 400
-        # if status:
-        #     params["status"] = status
         if cursor:
             params["cursor"] = cursor
         return self._get("/markets", params)
@@ -88,7 +106,7 @@ class KalshiClient:
         return self._get(f"/markets/{ticker}").get("market", {})
 
     def get_orderbook(self, ticker, depth=20):
-        return self._get(f"/orderbook/{ticker}").get("orderbook", {})
+        return self._get(f"/orderbook/{ticker}", {"depth": str(depth)}).get("orderbook", {})
 
     def get_midpoint(self, ticker):
         resp = self._get(f"/markets/{ticker}/midpoint")
@@ -99,19 +117,6 @@ class KalshiClient:
     def place_order(self, ticker, action="buy", side="yes", count=1,
                     yes_price=None, no_price=None, expiration_type="GTC",
                     order_type="limit"):
-        """
-        Place a Kalshi order.
-
-        Args:
-            ticker: Kalshi market ticker
-            action: "buy" or "sell"
-            side: "yes" or "no"
-            count: number of contracts
-            yes_price: price in cents for YES side (limit orders)
-            no_price: price in cents for NO side (limit orders)
-            expiration_type: "GTC", "GTD", "IOC", "FOK"
-            order_type: "limit" or "market" (default "limit")
-        """
         body = {
             "ticker": ticker,
             "action": action,
@@ -119,18 +124,15 @@ class KalshiClient:
             "count": count,
             "expiration_type": expiration_type,
         }
-
-        # For limit orders, attach price
         if order_type == "limit":
             if yes_price is not None:
                 body["yes_price"] = yes_price
             if no_price is not None:
                 body["no_price"] = no_price
-        # Market orders use action_price
         elif order_type == "market":
             body["action_type"] = "market"
 
-        return self._post("/orders", body)
+        return self._post("/portfolio/orders", body)
 
     def cancel_order(self, order_id):
         return self._delete(f"/orders/{order_id}")
@@ -144,16 +146,13 @@ class KalshiClient:
     # ---- Portfolio ----
 
     def get_positions(self, settlement_status="open"):
-        return self._get(
-            "/positions",
-            {"settlement_status": settlement_status},
-        )
+        return self._get("/positions", {"settlement_status": settlement_status})
 
     def get_portfolio(self):
         return self._get("/portfolio")
 
     def get_balance(self):
-        return self._get("/balances")
+        return self._get("/portfolio/balance")
 
     # ---- History ----
 
@@ -162,9 +161,3 @@ class KalshiClient:
 
     def get_settlements(self, limit=100):
         return self._get("/settlements", {"limit": str(limit)})
-
-    def _delete(self, path):
-        headers = self._sign("DELETE", path)
-        r = self._session.delete(self.base_url + path, headers=headers, timeout=10)
-        r.raise_for_status()
-        return r.json()
