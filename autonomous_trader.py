@@ -427,16 +427,18 @@ class Trader:
             try:
                 result = self.client.place_order(
                     ticker=ticker, action="buy", side=side, count=1,
-                    yes_price=pc if side == "yes" else None,
-                    no_price=pc if side == "no" else None)
-                order = result.get("order", {})
-                oid = order.get("order_id", "?")
-                status = order.get("status", "?")
-                self.state.save_trade(ticker, side, pc, status, oid)
+                    yes_price=pc if side=="yes" else None,
+                    no_price=pc if side=="no" else None)
+                order = result.get("order",{})
+                oid = order.get("order_id","?")
+                status = order.get("status","?")
+                self.conn.execute("INSERT INTO trades VALUES (?,?,?,?,?,?)",
+                    (int(time.time()), ticker, side, pc, status, oid))
+                self.conn.commit()
                 self.stats["total_trades"] += 1
-                self.daily_pnl -= pc
-                placed += 1
-                log.info(f"    → {oid}: {status}")
+                # Only count against daily PnL when EXECUTED, not when resting
+                if status == "executed":
+                    self.daily_pnl -= pc
 
                 if status == "executed":
                     self.state.record_fill(ticker, side, pc)

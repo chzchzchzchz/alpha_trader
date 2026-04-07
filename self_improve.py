@@ -119,11 +119,18 @@ def evaluate_backtest_performance(conn):
                 "SELECT bt_wr, bt_pnl, bt_markets FROM research_proposals "
                 "WHERE strategy = ? ORDER BY ts DESC LIMIT 10",
                 (strat,)).fetchall()
+            
+            if not rows:
+                # Try backtest_validation results
+                rows = conn.execute(
+                    "SELECT win_rate, total_pnl, n_trades FROM bt_results "
+                    "WHERE strategy = ? AND verdict='PASS' ORDER BY ts DESC LIMIT 10",
+                    (strat,)).fetchall()
         
         if rows:
             avg_wr = sum(r[0] for r in rows) / len(rows)
             avg_pnl = sum(r[1] for r in rows) / len(rows)
-            avg_n = sum(r[2] for r in rows) / len(rows)
+            avg_n = sum(r[2] if len(r) > 2 else 0 for r in rows) / len(rows)
             results[strat] = {
                 "wr": round(avg_wr, 3),
                 "pnl": round(avg_pnl, 1),

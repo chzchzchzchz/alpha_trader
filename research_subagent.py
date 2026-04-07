@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Research Subagent — ALWAYS running
-Discovers new market opportunities, backtests strategies on REAL Kalshi data,
-and proposes new alpha. Writes proposals to DB for autonomous_trader.py to execute.
-
-Runs independently. Never restarts. Self-improves.
+"""Research SubAgent v3 — Real-time OPEN market scanning
+Does NOT use the broken settled market API (status=settled returns final prices not historical).
+Instead: scans OPEN markets, runs swarm analysis, calculates expected PnL.
+Works RIGHT NOW with real market data.
 """
 import os, sys, time, sqlite3, json, math, random, logging
 from datetime import datetime, timezone
@@ -11,11 +10,12 @@ from pathlib import Path
 import requests
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 DB_PATH = os.path.expanduser("~/alpha_trader/data/autonomous.db")
-LOG_PATH = os.path.expanduser("~/alpha_trader/logs/research.log")
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+LOG_PATH = os.path.expanduser("~/alpha_trader/logs/research_agent.log")
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+API = "https://api.elections.kalshi.com/trade-api/v2"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,230 +24,84 @@ logging.basicConfig(
 )
 log = logging.getLogger("research")
 
-API = "https://api.elections.kalshi.com/trade-api/v2"
+
+class Swarm:
+    def __init__(self, n=300):
+        self.agents = []
+        types = [("quant",0.20,0,0.3,0.8,True),("contrarian",0.15,0,0.6,-0.6,True),
+                 ("bull",0.15,0.5,0.7,0.9,False),("bear",0.10,-0.4,0.8,0.7,False),
+                 ("degen",0.15,0.3,1.1,0.6,True),("cautious",0.10,-0.1,0.2,0.3,False),
+                 ("momentum",0.10,0,1.3,0.95,False),("news",0.05,0.2,0.9,0.7,True)]
+        pid = 0
+        for ptype,w,bias,vol,sens,cheap in types:
+            for _ in range(int(n*w)):
+                self.agents.append(dict(ptype=ptype,w=w,bias=bias,vol=vol,sens=sens,cheap=cheap))
+                pid += 1
+        self.agents = self.agents[:n]
+
+    def predict(self, price, days):
+        votes = []
+        for a in self.agents:
+            ch = price < 0.15
+            if a["ptype"] == "quant":
+                p = (1-price)*0.25+random.gauss(0,0.05) if(ch and a["cheap"]) else price+random.gauss(0,a["vol"]*0.05)
+            elif a["ptype"] == "contrarian":
+                p = 0.22+random.gauss(0,0.08) if(ch and a["cheap"]) else 1-price+random.gauss(0,0.06)
+            elif a["ptype"] == "degen":
+                p = 0.18+a["bias"]*0.2+random.gauss(0,0.1) if(ch and a["cheap"]) else price*(1+a["bias"]*0.5)+random.gauss(0,0.08)
+            elif a["ptype"] == "news":
+                p = 0.20+random.gauss(0,0.12) if(ch and a["cheap"]) else price+a["bias"]*0.05
+            elif a["ptype"] == "bull":
+                p = price*(1+a["bias"]*0.15)+random.gauss(0,a["vol"]*0.06)
+            elif a["ptype"] == "bear":
+                p = price*(1-abs(a["bias"])*0.1)-abs(a["bias"])*0.08+random.gauss(0,0.06)
+            elif a["ptype"] == "momentum":
+                p = price+a["sens"]*0.05+random.gauss(0,a["vol"]*0.07)
+            else:
+                p = price+a["bias"]*0.03+random.gauss(0,a["vol"]*0.06)
+            if days is not None:
+                p += random.gauss(0, 0.06*math.exp(-days/20))
+            votes.append(("yes" if p>=0.5 else "no", max(0.01,min(0.99,p))))
+        yes_w = sum(self.agents[i]["w"] for i,(v,_) in enumerate(votes) if v=="yes")
+        no_w = sum(self.agents[i]["w"] for i,(v,_) in enumerate(votes) if v=="no")
+        total = yes_w+no_w
+        yp = yes_w/total if total>0 else 0.5
+        return round(yp,4)
 
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""CREATE TABLE IF NOT EXISTS research_proposals (
-        ts INTEGER, ticker TEXT, side TEXT, strategy TEXT,
-        yes_bid REAL, yes_ask REAL, vol REAL, bt_markets INT,
-        bt_wr REAL, bt_pnl REAL, bt_sharpe REAL, expected_pnl REAL,
-        proposal_score REAL, verdict TEXT, details TEXT
-    )""")
-    conn.commit()
-    return conn
-
-
-def fetch_markets(series=None, status="open", limit=200):
-    """Fetch markets from API with pagination."""
+def fetch_all_open(limit_per_page=200, max_pages=10):
+    """Fetch ALL open markets via pagination, filtering out non-priced markets."""
     all_mkts = []
     cursor = None
-    params = {"status": status, "limit": min(limit, 200)}
-    if series:
-        params["series_ticker"] = series
-
-    url = f"{API}/markets"
-    for _ in range(5):  # max 5 pages
+    for page in range(max_pages):
         try:
+            url = f"{API}/markets?status=open&limit={limit_per_page}"
             if cursor:
-                r = requests.get(f"{url}?cursor={cursor}", params=params, timeout=15)
-            else:
-                r = requests.get(url, params=params, timeout=15)
-            if r.status_code != 200:
-                break
+                url += f"&cursor={cursor}"
+            r = requests.get(url, timeout=20)
+            if r.status_code != 200: break
             data = r.json()
             mkts = data.get("markets", [])
-            all_mkts.extend(mkts)
+            # Filter: only keep markets that have real bid/ask prices
+            # Multi-game parlays have bid=0, ask=0 — skip them
+            real_mkts = [m for m in mkts 
+                        if m.get("yes_bid_dollars") is not None 
+                        and m.get("yes_ask_dollars") is not None
+                        and float(m.get("yes_bid_dollars", 0) or 0) > 0]
+            all_mkts.extend(real_mkts)
             cursor = data.get("cursor")
-            if not cursor or len(mkts) < 200:
+            if not cursor or len(mkts) < limit_per_page:
                 break
+            # Log progress
+            log.info(f"  Page {page+1}: got {len(mkts)} markets, {len(real_mkts)} with prices (total so far: {len(all_mkts)})")
             time.sleep(0.05)
-        except:
+        except Exception as e:
+            log.error(f"  Page {page+1} error: {e}")
             break
     return all_mkts
 
 
-def fetch_historical(series_ticker, limit=100):
-    """Fetch SETTLED markets for backtesting."""
-    mkts = fetch_markets(series_ticker, status="settled", limit=limit)
-    return mkts
-
-
-def backtest_strategy(strategy_name, markets):
-    """
-    Backtest a strategy on settled markets. Returns stats dict.
-    Each market has: yes_bid_dollars, yes_ask_dollars, result, close_time
-    """
-    trades = []
-    trades_per_market = 0
-
-    for mkt in markets:
-        result = mkt.get("result", "")
-        if result not in ("yes", "no"):
-            continue
-
-        bid = mkt.get("yes_bid_dollars")
-        ask = mkt.get("yes_ask_dollars")
-        if bid is None or ask is None:
-            continue
-
-        bid_c = round(float(bid) * 100)
-        ask_c = round(float(ask) * 100)
-
-        if strategy_name == "near_zero_no":
-            # Buy NO when YES is cheap (1-15c)
-            if 1 <= ask_c <= 15:
-                no_price = 100 - ask_c  # NO costs this much
-                if result == "no":  # We were right
-                    pnl = no_price - 2  # Profit minus spread
-                else:
-                    pnl = -no_price  # Lost our buy
-                trades.append(pnl)
-                trades_per_market += 1
-
-        elif strategy_name == "near_zero_yes":
-            # Buy YES when YES is cheap (1-15c)
-            if 1 <= ask_c <= 15:
-                if result == "yes":
-                    pnl = (100 - ask_c) - 2
-                else:
-                    pnl = -ask_c
-                trades.append(pnl)
-                trades_per_market += 1
-
-        elif strategy_name == "overpriced_short":
-            # Short (buy NO) when YES is 85c+
-            if bid_c >= 85:
-                no_price = 100 - bid_c
-                if result == "no":
-                    pnl = no_price - 2
-                else:
-                    pnl = -no_price
-                trades.append(pnl)
-
-        elif strategy_name == "momentum_yes":
-            # Buy YES when market is 20-50c and trending
-            if 20 <= ask_c <= 50 and trades_per_market > 0:
-                if result == "yes":
-                    pnl = (100 - ask_c) - 2
-                else:
-                    pnl = -ask_c
-                trades.append(pnl)
-
-    if not trades:
-        return None
-
-    n = len(trades)
-    wins = sum(1 for t in trades if t > 0)
-    wr = wins / n
-    total = sum(trades)
-    avg = total / n
-    std = math.sqrt(sum((t - avg)**2 for t in trades) / max(n, 1)) if n > 1 else 1
-    sharpe = (avg / std) * math.sqrt(n) if std > 0 else 0
-
-    return {
-        "n": n, "wins": wins, "wr": round(wr, 3),
-        "total_pnl": round(total, 1), "avg_pnl": round(avg, 1),
-        "sharpe": round(sharpe, 3)
-    }
-
-
-def scan_series_for_alpha(series_ticker, conn):
-    """Research a single series for exploitable patterns."""
-    results = []
-
-    # Step 1: Fetch settled markets and backtest each strategy
-    hist = fetch_historical(series_ticker, limit=200)
-    if not hist:
-        return results
-
-    strategies = ["near_zero_no", "near_zero_yes", "overpriced_short", "momentum_yes"]
-    for strat in strategies:
-        stats = backtest_strategy(strat, hist)
-        if stats and stats["wr"] >= 0.55 and stats["total_pnl"] > 0 and stats["n"] >= 5:
-            results.append({
-                "series": series_ticker,
-                "strategy": strat,
-                "backtest": stats,
-            })
-
-    # Step 2: Check current open markets for opportunities matching winning strategies
-    open_mkts = fetch_markets(series_ticker, status="open", limit=50)
-    for strat_result in results:
-        strat = strat_result["strategy"]
-        bt = strat_result["backtest"]
-        for mkt in open_mkts[:10]:
-            bid = mkt.get("yes_bid_dollars")
-            ask = mkt.get("yes_ask_dollars")
-            if bid is None or ask is None:
-                continue
-            bid_c = round(float(bid) * 100)
-            ask_c = round(float(ask) * 100)
-            vol = float(mkt.get("volume_24h_fp", 0) or 0)
-            if vol < 5:
-                continue
-
-            ticker = mkt.get("ticker", "")
-            proposal = None
-
-            if strat == "near_zero_no" and ask_c <= 15:
-                yes_swarm = bid_c / 100.0
-                no_probability = 1 - yes_swarm
-                no_cost = 100 - bid_c  # NO ask price
-                exp_pnl = no_probability * (100 - no_cost) - (1 - no_probability) * no_cost - 2
-                if exp_pnl > 3:  # Min 3c expected profit
-                    proposal = {
-                        "ticker": ticker, "side": "no",
-                        "strategy": strat,
-                        "yes_bid": bid, "yes_ask": ask, "vol": vol,
-                        "bt_markets": bt["n"], "bt_wr": bt["wr"],
-                        "bt_pnl": bt["total_pnl"], "bt_sharpe": bt["sharpe"],
-                        "expected_pnl": round(exp_pnl, 1),
-                    }
-
-            elif strat == "near_zero_yes" and ask_c <= 15:
-                yes_swarm = ask_c / 100.0
-                exp_pnl = yes_swarm * (100 - ask_c) - (1 - yes_swarm) * ask_c - 2
-                if exp_pnl > 3:
-                    proposal = {
-                        "ticker": ticker, "side": "yes",
-                        "strategy": strat,
-                        "yes_bid": bid, "yes_ask": ask, "vol": vol,
-                        "bt_markets": bt["n"], "bt_wr": bt["wr"],
-                        "bt_pnl": bt["total_pnl"], "bt_sharpe": bt["sharpe"],
-                        "expected_pnl": round(exp_pnl, 1),
-                    }
-
-            elif strat == "overpriced_short" and bid_c >= 85:
-                yes_swarm = bid_c / 100.0
-                no_probability = 1 - yes_swarm
-                no_cost = 100 - bid_c
-                exp_pnl = no_probability * (100 - no_cost) - (1 - no_probability) * no_cost - 2
-                if exp_pnl > 5:
-                    proposal = {
-                        "ticker": ticker, "side": "no",
-                        "strategy": strat,
-                        "yes_bid": bid, "yes_ask": ask, "vol": vol,
-                        "bt_markets": bt["n"], "bt_wr": bt["wr"],
-                        "bt_pnl": bt["total_pnl"], "bt_sharpe": bt["sharpe"],
-                        "expected_pnl": round(exp_pnl, 1),
-                    }
-
-            if proposal:
-                # Score: higher backtest WR and higher expected PnL = higher score
-                score = bt["wr"] * 100 + proposal["expected_pnl"] / 5 + min(bt["n"] / 10, 10)
-                proposal["proposal_score"] = round(score, 1)
-                proposal["ts"] = int(time.time())
-                proposal["verdict"] = "PROPOSE" if bt["wr"] >= 0.60 else "WATCH"
-                proposal["details"] = f"BT: WR={bt['wr']:.0%} PnL={bt['total_pnl']:.0f}c N={bt['n']}"
-                results.append({"proposal": proposal})
-
-    return results
-
-
-def get_all_series():
-    """Get list of all series from Kalshi."""
+def get_series():
     try:
         r = requests.get(f"{API}/series?limit=200", timeout=15)
         if r.status_code == 200:
@@ -258,63 +112,144 @@ def get_all_series():
 
 
 def main_loop():
-    conn = init_db()
-    log.info("Research SubAgent started. Scanning Kalshi for alpha...")
+    swarm = Swarm(n=300)
+    
+    log.info("=" * 70)
+    log.info("RESEARCH SUBAGENT v3 — Scanning ALL Open Markets")
+    log.info(f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    log.info("=" * 70)
 
-    # Get all series sorted by volume (most active first)
-    series = get_all_series()
-    log.info(f"Found {len(series)} series on Kalshi")
-
-    # Priority: weather and temperature series first (most liquid)
-    priority = [s for s in series if any(kw in s.get("ticker", "").upper()
-                for kw in ["TEMP", "HIGH", "LOW", "SNOW", "WIND", "RAIN", "HIGHNY", "LOWTPHIL", "LOWTLAX"])]
-    rest = [s for s in series if s not in priority]
-    scan_queue = priority + rest
+    # Get series info for enrichment
+    all_series = get_series()
+    series_info = {}
+    for s in all_series:
+        series_info[s.get("ticker", "")] = s.get("title", s.get("category", ""))
+    
+    log.info(f"Series cache: {len(series_info)} series")
 
     cycle = 0
     while True:
         cycle += 1
-        log.info(f"\n{'='*60}\nResearch Cycle {cycle} at {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
+        log.info(f"\n--- Research Cycle {cycle} at {datetime.now(timezone.utc).strftime('%H:%M UTC')} ---")
 
-        proposals_found = 0
-        backtests_run = 0
-        new_series = 0
+        t0 = time.time()
+        
+        # Fetch ALL open markets in one call (with pagination)
+        all_open = fetch_all_open()
+        t1 = time.time()
+        log.info(f"Fetched {len(all_open)} open markets in {t1-t0:.1f}s")
 
-        # Scan up to 20 series per cycle
-        for s in scan_queue[:20]:
-            ticker = s.get("ticker", "")
-            if not ticker:
-                continue
-            new_series += 1
-            results = scan_series_for_alpha(ticker, conn)
+        if not all_open:
+            log.warning("No markets fetched. Retrying in 60s...")
+            time.sleep(60)
+            continue
 
-            # Log backtest results
-            for r in results:
-                if "backtest" in r:
-                    bt = r["backtest"]
-                    strat = r.get("strategy", "?")
-                    log.info(f"  BT {ticker} {strat}: WR={bt['wr']:.0%} PnL={bt['total_pnl']:+.0f}c trades={bt['n']}")
-                    backtests_run += 1
-                elif "proposal" in r:
-                    p = r["proposal"]
-                    conn.execute(
-                        "INSERT INTO research_proposals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (p["ts"], p["ticker"], p["side"], p["strategy"],
-                         p["yes_bid"], p["yes_ask"], p["vol"], p["bt_markets"],
-                         p["bt_wr"], p["bt_pnl"], p["bt_sharpe"], p["expected_pnl"],
-                         p["proposal_score"], p["verdict"], p["details"]))
-                    log.info(f"  PROPOSAL: {p['ticker']} {p['side']} via {p['strategy']} "
-                             f"Exp={p['expected_pnl']:+.0f}c Score={p['proposal_score']:.1f}")
-                    proposals_found += 1
+        # Analyze each market
+        proposals = []
+        for mkt in all_open:
+            bid = mkt.get("yes_bid_dollars")
+            ask = mkt.get("yes_ask_dollars")
+            if bid is None or ask is None: continue
+            
+            bid_c = round(float(bid) * 100)
+            ask_c = round(float(ask) * 100)
+            vol = mkt.get("volume_24h_fp")
+            vol = float(vol) if vol else 0
+            if vol < 10: continue
+            if ask_c >= 98 or bid_c <= 2: continue  # Skip near-resolved
+            
+            ticker = mkt.get("ticker", "")
+            series_t = mkt.get("event_ticker", ticker.split("-")[0] if "-" in ticker else "?")
+            
+            ct = mkt.get("close_time", "")
+            days = None
+            if ct:
+                try:
+                    cdt = datetime.fromisoformat(ct.replace("Z", "+00:00"))
+                    days = max(0, (cdt - datetime.now(timezone.utc)).total_seconds() / 86400)
+                except: pass
+            
+            price = (bid_c + ask_c) / 200
+            swarm_yes = swarm.predict(price, days)
 
-        conn.commit()
-        log.info(f"\nCycle {cycle}: scanned={new_series} backtests={backtests_run} proposals={proposals_found}")
+            # Strategy 1: Buy YES when cheap AND swarm agrees
+            if ask_c <= 15 and swarm_yes > 0.35:
+                cost = ask_c
+                win_prob = swarm_yes
+                exp_pnl = win_prob * (100 - cost) - (1 - win_prob) * cost - 2
+                if exp_pnl > 5:
+                    score = (swarm_yes * 100) + (exp_pnl / 3) + min(vol/100, 20)
+                    proposals.append(dict(
+                        ticker=ticker, side="yes", strategy="near_zero_yes",
+                        yes_bid=bid, yes_ask=ask, vol=vol,
+                        exp_pnl=round(exp_pnl,1), score=round(score,1),
+                        swarm_yes=round(swarm_yes,3),
+                        details=f"YES@{ask_c}c Swarm:{swarm_yes:.0%} ExpPnL:{exp_pnl:.1f}c vol={vol:.0f}"
+                    ))
 
-        # Self-improve: if we found lots of proposals, increase scan depth next cycle
-        if proposals_found > 5:
-            log.info(f"  High alpha found! Increasing scan window.")
+            # Strategy 2: Buy NO when YES is expensive (>=85c) AND swarm says <70%
+            elif bid_c >= 85 and swarm_yes < 0.70:
+                no_cost = 100 - bid_c
+                win_prob = 1 - swarm_yes
+                exp_pnl = win_prob * (100 - no_cost) - (1 - win_prob) * no_cost - 2
+                if exp_pnl > 5:
+                    score = ((1-swarm_yes) * 100) + (exp_pnl / 3) + min(vol/100, 20)
+                    proposals.append(dict(
+                        ticker=ticker, side="no", strategy="overpriced_no",
+                        yes_bid=bid, yes_ask=ask, vol=vol,
+                        exp_pnl=round(exp_pnl,1), score=round(score,1),
+                        swarm_yes=round(swarm_yes,3),
+                        details=f"YES@{bid_c}c Swarm:{swarm_yes:.0%} NO_cost={no_cost:.0f}c ExpPnL:{exp_pnl:.1f}c"
+                    ))
 
-        time.sleep(120)  # Scan every 2 minutes
+        t2 = time.time()
+        log.info(f"Analyzed {len(all_open)} markets in {t2-t1:.1f}s — found {len(proposals)} proposals")
+
+        # Sort and save top 50
+        proposals.sort(key=lambda p: p["score"], reverse=True)
+        ts = int(time.time())
+        
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("DROP TABLE IF EXISTS research_proposals")
+            conn.execute("""CREATE TABLE research_proposals (
+                ts INTEGER, ticker TEXT, side TEXT, strategy TEXT,
+                yes_bid REAL, yes_ask REAL, vol REAL, exp_pnl REAL,
+                score REAL, swarm_yes REAL, details TEXT
+            )""")
+            for p in proposals[:50]:
+                conn.execute("INSERT INTO research_proposals VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (ts, p["ticker"], p["side"], p["strategy"],
+                     p["yes_bid"], p["yes_ask"], p["vol"], p["exp_pnl"],
+                     p["score"], p["swarm_yes"], p["details"]))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.error(f"DB error: {e}")
+
+        # Print top 10
+        if proposals:
+            log.info(f"\n{'TICKER':45s} {'SIDE':>4s} {'STRAT':>18s} {'EXP':>6s} {'SCR':>5s} {'VOL':>7s}")
+            log.info("-" * 90)
+            for p in proposals[:10]:
+                log.info(f"{p['ticker']:45s} {p['side']:>4s} {p['strategy']:>18s} {p['exp_pnl']:5.1f}c {p['score']:5.1f} {p['vol']:7.0f}")
+        else:
+            log.info("No proposals found")
+
+        # Print top open markets by volume for transparency
+        by_vol = sorted(all_open, key=lambda m: float(m.get("volume_24h_fp",0) or 0), reverse=True)[:5]
+        log.info(f"\nTop 5 markets by volume:")
+        for m in by_vol[:5]:
+            b = m.get("yes_bid_dollars")
+            a = m.get("yes_ask_dollars")
+            bc = round(float(b)*100) if b else 0
+            ac = round(float(a)*100) if a else 0
+            v = float(m.get("volume_24h_fp",0) or 0)
+            log.info(f"  {m.get('ticker','?'):45s} bid={bc}c ask={ac}c vol={v:.0f}")
+
+        elapsed = time.time() - t0
+        log.info(f"\nCycle complete in {elapsed:.1f}s. Sleep 120s.\n")
+        time.sleep(120)
 
 
 if __name__ == "__main__":
