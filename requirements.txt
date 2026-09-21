@@ -1,7 +1,7 @@
 # Core
 requests>=2.33.0          # CVE-2024-35195, CVE-2024-47081, CVE-2026-25645 fixed
 cryptography>=42.0.0      # RSA-PSS signing for the Kalshi API
-pyyaml>=6.0.1
+pyyaml>=6.0.3
 numpy>=1.26.4
 pandas>=2.2.2
 pydantic>=2.6
