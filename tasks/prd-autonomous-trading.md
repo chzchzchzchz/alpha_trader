@@ -62,7 +62,7 @@ Acceptance:
 
 ## Technical Constraints
 - Kalshi API: api.elections.kalshi.com/trade-api/v2
-- Auth: RSA-PSS, key_id=REDACTED_KALSHI_KEY_ID
+- Auth: RSA-PSS, key_id=$KALSHI_API_KEY_ID
 - Balance: $9.93 — micro-size everything ($1-3 trades)
 - Kalshi candles: 1min, 60min, 1440min available
 - Spread: minimum 1c each way = 2c round trip

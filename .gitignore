@@ -74,3 +74,21 @@ hs_err_pid*
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Runtime artifacts (databases, logs, generated media)
+/data/
+/logs/
+*.db
+*.sqlite
+*.jsonl
+*.out
+*.mp4
+*.wav
+trading.pid
+
+# Local agent config
+.claude/*.local.md
+
+# Extracted to a separate project (see ~/alpha_trader_youtube_automation)
+/youtube_automation/
+/tasks/youtube_*.md

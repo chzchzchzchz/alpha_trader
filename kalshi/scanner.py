@@ -164,7 +164,7 @@ def main():
     print("=" * 70)
 
     print("\nFetching markets from Kalshi... (this may take a minute)")
-    raw_markets = fetch_all_markets(status="open")
+    raw_markets = fetch_markets_sample(status="open")
     print(f"Fetched {len(raw_markets)} markets")
 
     # Analyze all markets

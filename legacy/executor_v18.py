@@ -26,7 +26,7 @@ log = logging.getLogger("exec")
 class Executor:
     def __init__(self):
         self.client = KalshiClient(
-            key_id='REDACTED_KALSHI_KEY_ID',
+            key_id=os.environ.get('KALSHI_API_KEY_ID'),
             private_key_path=os.path.expanduser('~/.kalshi/private_key.pem'),
             demo=False
         )

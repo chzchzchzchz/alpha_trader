@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from kalshi.client import KalshiClient
 
-KEY_ID = "REDACTED_KALSHI_KEY_ID"
+KEY_ID = os.environ.get("KALSHI_API_KEY_ID")
 PEM = os.path.expanduser("~/.kalshi/private_key.pem")
 DB_PATH = os.path.expanduser("~/alpha_trader/data/autonomous.db")
 LOG_PATH = os.path.expanduser("~/alpha_trader/logs/executor.log")

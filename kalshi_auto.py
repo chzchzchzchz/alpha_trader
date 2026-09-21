@@ -18,7 +18,7 @@ DBD=os.path.join(os.path.dirname(os.path.abspath(__file__)),"data")
 os.makedirs(DBD,exist_ok=True)
 DB=os.path.join(DBD,"kalshi.db")
 KP=os.path.join(os.path.dirname(os.path.abspath(__file__)),"kalshi_key.pem")
-KI=os.environ.get("KALSHI_KEY_ID","REDACTED_KALSHI_KEY_ID")
+KI=os.environ.get("KALSHI_KEY_ID") or os.environ.get("KALSHI_API_KEY_ID","")
 
 def idb():
     c=sqlite3.connect(DB)
@@ -32,6 +32,10 @@ idb()
 class KC:
     def __init__(self):
         if not HAS_K:self.auth=False;return
+        # This path bypasses kalshi.client, so apply the live-trading gate here.
+        sys.path.insert(0,os.path.dirname(os.path.abspath(__file__)))
+        from core.trading_mode import is_live
+        if not is_live(requested_live=True,context="kalshi_auto"):self.auth=False;return
         try:
             self.k=KalshiClient(Configuration(host="https://trading-api.kalshi.com/trade-api/v2"))
             self.k.set_kalshi_auth(key_id=KI,private_key_path=KP)

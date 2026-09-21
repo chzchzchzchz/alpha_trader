@@ -3,11 +3,11 @@
 Check actual contract direction definitions by fetching market detail.
 """
 import os, sys
-sys.path.insert(0, '~/alpha_trader')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kalshi.client import KalshiClient
 
 client = KalshiClient(
-    key_id='REDACTED_KALSHI_KEY_ID',
+    key_id=os.environ.get('KALSHI_API_KEY_ID'),
     private_key_path=os.path.expanduser('~/.kalshi/private_key.pem'),
     demo=False
 )

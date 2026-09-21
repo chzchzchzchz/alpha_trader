@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from kalshi.client import KalshiClient
 import backtest_validation_layer as vlayer
 
-KEY_ID = "REDACTED_KALSHI_KEY_ID"
+KEY_ID = os.environ.get("KALSHI_API_KEY_ID")
 PEM = os.path.expanduser("~/.kalshi/private_key.pem")
 API = "https://api.elections.kalshi.com/trade-api/v2"
 DB_PATH = os.path.expanduser("~/alpha_trader/data/autonomous.db")
@@ -284,12 +284,15 @@ class Trader:
             bc_cents = int(bc * 100)
 
             score = 0
+            # edge = swarm_yes - market_price, signed: positive means YES looks
+            # underpriced. Only positive-edge YES buys are scored; abs() here
+            # would rank the most overpriced contracts highest.
             if 1 <= bc_cents <= 15 and result["edge"] > 0.02:
-                score = abs(result["edge"]) * result["signal"] * 2000
-            elif result["signal"] > 0.4 and abs(result["edge"]) > 0.08:
-                score = abs(result["edge"]) * result["signal"] * 500
+                score = result["edge"] * result["signal"] * 2000
+            elif result["signal"] > 0.4 and result["edge"] > 0.08:
+                score = result["edge"] * result["signal"] * 500
 
-            if score > 0.3:
+            if score > 0.3 and result["rec"] == "buy_yes":
                 all_signals.append(dict(
                     ticker=m["ticker"], price=price,
                     bid_cents=bc_cents, ask_cents=int(ac * 100),

@@ -1,0 +1,52 @@
+# Model Routing Configuration
+# Defines capability → model mappings for Hermes Agent integration
+
+endpoints:
+  # OpenRouter models (fast, cheap)
+  gpt4o_mini:
+    provider: openrouter
+    model: openai/gpt-4o-mini
+    api_key_env: OPENROUTER_API_KEY
+    base_url: https://openrouter.ai/api/v1
+    priority: 1
+    max_retries: 3
+    timeout: 15
+    cost_per_1k: 0.00015
+
+  claude_haiku:
+    provider: openrouter
+    model: anthropic/claude-3-haiku
+    api_key_env: OPENROUTER_API_KEY
+    base_url: https://openrouter.ai/api/v1
+    priority: 2
+    cost_per_1k: 0.00025
+
+  # Local models (untrusted/uncensored)
+  local_llama:
+    provider: local
+    model: meta-llama/llama-2-70b-chat
+    api_key_env: DUMMY_KEY
+    base_url: http://localhost:11434/v1
+    priority: 3
+    cost_per_1k: 0.0
+
+capabilities:
+  # High-speed, low-latency tasks (signal generation, market fetch)
+  fast:
+    models: [gpt4o_mini, claude_haiku]
+    fallback: gpt4o_mini
+
+  # Complex reasoning (strategy coordination, risk analysis)
+  reasoning:
+    models: [claude_haiku, gpt4o_mini]
+    fallback: gpt4o_mini
+
+  # Uncensored analysis (market extremis, panic mode)
+  uncensored:
+    models: [local_llama]
+    fallback: gpt4o_mini
+
+  # Default for unclassified tools
+  general:
+    models: [gpt4o_mini]
+    fallback: gpt4o_mini

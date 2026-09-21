@@ -23,6 +23,8 @@ try:
 except ImportError:
     HAS_CRYPTO = False
 
+from core.trading_mode import LIVE, LiveTradingNotArmed, resolve_mode
+
 _DEMO = "https://demo-api.kalshi.co/trade-api/v2"
 _PROD = "https://api.elections.kalshi.com/trade-api/v2"
 
@@ -30,6 +32,15 @@ class KalshiClient:
     """Kalshi REST API client with RSA-PSS authentication."""
 
     def __init__(self, key_id=None, private_key_path=None, demo=True):
+        # `demo` selects the API host and is honoured as given so that reads,
+        # balance checks and emergency cancels always hit the account the
+        # caller named. Placing an order against the production host is gated
+        # separately by core.trading_mode (see place_order).
+        self.demo = bool(demo)
+        self._live_armed = (
+            resolve_mode(requested_live=True, context="KalshiClient") == LIVE
+            if not self.demo else False
+        )
         self.key_id = key_id or os.environ.get("KALSHI_API_KEY_ID", "")
         pem = private_key_path or os.environ.get("KALSHI_API_KEY_FILE")
         self.base_url = _DEMO if demo else _PROD
@@ -121,6 +132,11 @@ class KalshiClient:
                     type="limit", client_order_id=None, post_only=False,
                     reduce_only=False, cancel_on_pause=False):
         import uuid
+        if not self.demo and not self._live_armed:
+            raise LiveTradingNotArmed(
+                "Refusing to place a REAL order: live trading is not armed. "
+                "Set LIVE_TRADING_ARMED to the arm phrase (see core/trading_mode.py)."
+            )
         body: dict[str, Any] = {
             "ticker": ticker,
             "side": side,

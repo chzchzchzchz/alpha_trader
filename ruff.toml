@@ -1,0 +1,4 @@
+target-version = "py310"
+line-length = 120
+# Superseded by weather_oracle_v22.py; kept only for history and does not parse.
+exclude = ["legacy/weather_oracle_v20.py", "venv", ".venv", "data", "logs"]

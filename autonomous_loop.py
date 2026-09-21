@@ -20,7 +20,7 @@ from kalshi.wallet_analyzer import WalletAnalyzer
 from mirofish import MiroFishSwarm
 
 # ── CREDENTIALS ──
-KEY_ID = "REDACTED_KALSHI_KEY_ID"
+KEY_ID = os.environ.get("KALSHI_API_KEY_ID")
 PEM = os.path.expanduser("~/.kalshi/private_key.pem")
 
 DB = os.path.expanduser("~/alpha_trader/data/autonomous_trades.db")

@@ -87,7 +87,7 @@ def start():
     if find_pids(): return {"ok":False,"msg":"already running"}
     subprocess.Popen(
         [sys.executable, str(SCRIP)],
-        cwd="~/alpha_trader",
+        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         stdout=open(LOG,"a"), stderr=subprocess.STDOUT,
         start_new_session=True,
     )
