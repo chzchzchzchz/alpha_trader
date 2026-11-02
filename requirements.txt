@@ -4,7 +4,7 @@ cryptography>=42.0.0      # RSA-PSS signing for the Kalshi API
 pyyaml>=6.0.3
 numpy>=1.26.4
 pandas>=2.2.2
-pydantic>=2.13.5
+pydantic>=2.14.2
 
 # Brokers / data
 alpaca-trade-api>=3.0.0
