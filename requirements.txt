@@ -11,7 +11,7 @@ alpaca-trade-api>=3.0.0
 yfinance>=0.2.40
 
 # LLM
-openai>=1.14.0
+openai>=3.41.0
 langgraph>=1.1.6
 langchain-core>=1.6.3     # CVE-2026-44843, CVE-2026-40087 fixed
 
